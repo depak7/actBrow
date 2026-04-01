@@ -13,26 +13,23 @@ class RoutingModelProviderTests {
 	@Test
 	void routesUsingProviderPrefixInModelName() {
 		RecordingProvider gemini = new RecordingProvider("gemini");
-		RecordingProvider sarvam = new RecordingProvider("sarvam");
-		RoutingModelProvider provider = new RoutingModelProvider(List.of(gemini, sarvam),
+		RoutingModelProvider provider = new RoutingModelProvider(List.of(gemini),
 			new LlmProperties("gemini"));
 
-		provider.decideNextStep("sarvam:sarvam-m", "prompt", List.of(), List.of(), 0);
+		provider.decideNextStep("gemini:gemini-pro", "prompt", List.of(), List.of(), 0);
 
-		assertEquals("sarvam-m", sarvam.lastModel);
-		assertEquals(null, gemini.lastModel);
+		assertEquals("gemini-pro", gemini.lastModel);
 	}
 
 	@Test
 	void fallsBackToDefaultProviderWhenNoPrefixIsPresent() {
 		RecordingProvider gemini = new RecordingProvider("gemini");
-		RecordingProvider sarvam = new RecordingProvider("sarvam");
-		RoutingModelProvider provider = new RoutingModelProvider(List.of(gemini, sarvam),
-			new LlmProperties("sarvam"));
+		RoutingModelProvider provider = new RoutingModelProvider(List.of(gemini),
+			new LlmProperties("gemini"));
 
-		provider.decideNextStep("sarvam-chat", "prompt", List.of(), List.of(), 0);
+		provider.decideNextStep("gemini-chat", "prompt", List.of(), List.of(), 0);
 
-		assertEquals("sarvam-chat", sarvam.lastModel);
+		assertEquals("gemini-chat", gemini.lastModel);
 	}
 
 	private static final class RecordingProvider implements ModelProvider {
