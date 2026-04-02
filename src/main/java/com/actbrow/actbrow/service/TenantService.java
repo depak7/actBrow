@@ -20,28 +20,50 @@ public class TenantService {
 		this.tenantRepository = tenantRepository;
 	}
 
-	public TenantResponse create(TenantRequest request) {
+	public TenantResponse create(TenantRequest request, String userId) {
 		tenantRepository.findByKey(request.key()).ifPresent(existing -> {
 			throw new IllegalArgumentException("Tenant key already exists");
 		});
 
+		// Check if user already has a tenant (one tenant per user)
+		if (tenantRepository.existsByUserId(userId)) {
+			throw new IllegalStateException("User already has a tenant. Only one tenant per user is allowed.");
+		}
+
 		TenantEntity entity = new TenantEntity();
 		entity.setKey(request.key());
 		entity.setName(request.name());
+		entity.setUserId(userId);
 		entity.setApiKey(generateApiKey(request.apiKey()));
 		entity.setEnabled(request.enabled());
 		return toResponse(tenantRepository.save(entity));
 	}
 
+	public TenantResponse createForUser(String name, String userId) {
+		// Check if user already has a tenant
+		if (tenantRepository.existsByUserId(userId)) {
+			throw new IllegalStateException("User already has a tenant. Only one tenant per user is allowed.");
+		}
+
+		TenantEntity entity = new TenantEntity();
+		String key = name.toLowerCase().replaceAll("\\s+", "-");
+		entity.setKey(key);
+		entity.setName(name);
+		entity.setUserId(userId);
+		entity.setApiKey(generateApiKey(null));
+		entity.setEnabled(true);
+		return toResponse(tenantRepository.save(entity));
+	}
+
 	public TenantResponse update(String tenantId, TenantRequest request) {
 		TenantEntity entity = requireEntity(tenantId);
-		
+
 		if (!entity.getKey().equals(request.key())) {
 			tenantRepository.findByKey(request.key()).ifPresent(existing -> {
 				throw new IllegalArgumentException("Tenant key already exists");
 			});
 		}
-		
+
 		entity.setKey(request.key());
 		entity.setName(request.name());
 		if (request.apiKey() != null && !request.apiKey().isBlank()) {
@@ -59,6 +81,10 @@ public class TenantService {
 
 	public List<TenantResponse> list() {
 		return tenantRepository.findAll().stream().map(this::toResponse).toList();
+	}
+
+	public List<TenantResponse> listByUserId(String userId) {
+		return tenantRepository.findAllByUserId(userId).stream().map(this::toResponse).toList();
 	}
 
 	public TenantResponse getTenant(String tenantId) {
@@ -90,7 +116,7 @@ public class TenantService {
 		return "ak_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
 	}
 
-	private TenantResponse toResponse(TenantEntity entity) {
+	public TenantResponse toResponse(TenantEntity entity) {
 		return new TenantResponse(entity.getId(), entity.getKey(), entity.getName(),
 			entity.getApiKey(), entity.isEnabled(), entity.getCreatedAt());
 	}

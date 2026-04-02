@@ -20,7 +20,7 @@ public class AssistantService {
 		this.toolService = toolService;
 	}
 
-	public AssistantResponse createOrUpdate(CreateAssistantRequest request) {
+	public AssistantResponse createOrUpdate(CreateAssistantRequest request, String userId) {
 		AssistantDefinitionEntity entity = assistantRepository.findByKey(request.key()).orElse(null);
 		if(entity == null){
 			entity = new AssistantDefinitionEntity();
@@ -46,8 +46,7 @@ public class AssistantService {
 	}
 
 	public List<AssistantResponse> listByTenant(String tenantId) {
-		return assistantRepository.findAll().stream()
-			.filter(a -> tenantId == null || tenantId.equals(a.getTenantId()))
+		return assistantRepository.findAllByTenantId(tenantId).stream()
 			.map(this::toResponse)
 			.toList();
 	}

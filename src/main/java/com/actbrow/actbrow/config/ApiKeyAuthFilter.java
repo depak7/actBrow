@@ -3,6 +3,8 @@ package com.actbrow.actbrow.config;
 import java.io.IOException;
 import java.util.List;
 
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
@@ -14,6 +16,7 @@ import com.actbrow.actbrow.service.TenantService;
 import reactor.core.publisher.Mono;
 
 @Component
+@Order(Ordered.HIGHEST_PRECEDENCE + 1)
 public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final List<String> EXCLUDED_PATHS = List.of(
@@ -32,6 +35,11 @@ public class ApiKeyAuthFilter implements WebFilter {
 	@Override
 	public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
 		String path = exchange.getRequest().getPath().value();
+
+		// Allow CORS preflight requests to pass through
+		if ("OPTIONS".equalsIgnoreCase(exchange.getRequest().getMethod().name())) {
+			return chain.filter(exchange);
+		}
 
 		if (isExcluded(path)) {
 			return chain.filter(exchange);
