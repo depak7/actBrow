@@ -17,6 +17,7 @@ public record ToolRequest(
 	@NotBlank String version,
 	boolean enabled,
 	String executorRef,
-	Map<String, Object> defaultArguments
+	Map<String, Object> defaultArguments,
+	Map<String, Object> metadata
 ) {
 }

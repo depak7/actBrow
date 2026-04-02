@@ -11,6 +11,7 @@ public record ToolDescriptor(
 	String inputSchema,
 	ToolType type,
 	String executorRef,
-	Map<String, Object> defaultArguments
+	Map<String, Object> defaultArguments,
+	Map<String, Object> metadata
 ) {
 }

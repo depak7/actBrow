@@ -18,10 +18,11 @@ public record CreateAssistantToolRequest(
 	@NotBlank String version,
 	boolean enabled,
 	String executorRef,
-	Map<String, Object> defaultArguments
+	Map<String, Object> defaultArguments,
+	Map<String, Object> metadata
 ) {
 	public ToolRequest toToolRequest() {
 		return new ToolRequest(key, displayName, description, inputSchema, outputSchema, type, version, enabled,
-			executorRef, defaultArguments);
+			executorRef, defaultArguments, metadata);
 	}
 }

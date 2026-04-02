@@ -29,6 +29,8 @@ public class AssistantService {
 		entity.setName(request.name());
 		entity.setSystemPrompt(request.systemPrompt());
 		entity.setModel(request.model());
+		entity.setUsePredefinedFlows(request.usePredefinedFlows());
+		entity.setTenantId(request.tenantId());
 		AssistantDefinitionEntity saved = assistantRepository.save(entity);
 		toolService.attachBuiltInClientTools(saved.getId());
 		return toResponse(saved);
@@ -43,8 +45,15 @@ public class AssistantService {
 		return assistantRepository.findAll().stream().map(this::toResponse).toList();
 	}
 
+	public List<AssistantResponse> listByTenant(String tenantId) {
+		return assistantRepository.findAll().stream()
+			.filter(a -> tenantId == null || tenantId.equals(a.getTenantId()))
+			.map(this::toResponse)
+			.toList();
+	}
+
 	private AssistantResponse toResponse(AssistantDefinitionEntity entity) {
 		return new AssistantResponse(entity.getId(), entity.getKey(), entity.getName(), entity.getSystemPrompt(),
-			entity.getModel(), entity.getCreatedAt());
+			entity.getModel(), entity.isUsePredefinedFlows(), entity.getTenantId(), entity.getCreatedAt());
 	}
 }

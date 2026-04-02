@@ -17,6 +17,7 @@ public record ToolResponse(
 	boolean enabled,
 	String executorRef,
 	Map<String, Object> defaultArguments,
+	Map<String, Object> metadata,
 	Instant createdAt
 ) {
 }

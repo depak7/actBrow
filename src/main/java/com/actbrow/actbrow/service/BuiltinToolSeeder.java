@@ -24,7 +24,13 @@ public class BuiltinToolSeeder implements ApplicationRunner {
 		for (var tool : builtInToolCatalog.builtInClientTools()) {
 			toolService.upsertByKey(tool);
 		}
+		for (var tool : builtInToolCatalog.builtInHttpTools()) {
+			toolService.upsertByKey(tool);
+		}
 		assistantRepository.findAll()
-			.forEach(assistant -> toolService.attachBuiltInClientTools(assistant.getId()));
+			.forEach(assistant -> {
+				toolService.attachBuiltInClientTools(assistant.getId());
+				toolService.attachHttpTools(assistant.getId());
+			});
 	}
 }

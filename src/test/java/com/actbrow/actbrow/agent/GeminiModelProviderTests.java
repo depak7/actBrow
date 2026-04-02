@@ -74,7 +74,7 @@ class GeminiModelProviderTests {
 		ModelDecision decision = provider.decideNextStep("gemini-2.0-flash", "Be helpful",
 			List.of(message(ConversationMessageRole.USER, "find account")), List.of(
 				new ToolDescriptor("tool-1", "account.lookup", "Look up account", "{\"type\":\"object\"}",
-					com.actbrow.actbrow.model.ToolType.SERVER_BUILTIN, "accountLookup", Map.of())), 0);
+					com.actbrow.actbrow.model.ToolType.SERVER_BUILTIN, "accountLookup", Map.of(), Map.of())), 0);
 
 		ToolCallDecision toolDecision = assertInstanceOf(ToolCallDecision.class, decision);
 		assertEquals("account.lookup", toolDecision.toolCall().toolKey());

@@ -6,6 +6,8 @@ public record CreateAssistantRequest(
         @NotBlank String key,
         @NotBlank String name,
         String systemPrompt,
-        @NotBlank String model
+        @NotBlank String model,
+        boolean usePredefinedFlows,
+        String tenantId
 ) {
 }

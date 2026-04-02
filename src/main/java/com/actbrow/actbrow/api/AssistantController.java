@@ -29,7 +29,10 @@ public class AssistantController {
 	}
 
 	@GetMapping
-	public List<AssistantResponse> list() {
+	public List<AssistantResponse> list(@RequestParam(required = false) String tenantId) {
+		if (tenantId != null && !tenantId.isBlank()) {
+			return assistantService.listByTenant(tenantId);
+		}
 		return assistantService.list();
 	}
 }

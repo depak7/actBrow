@@ -49,6 +49,9 @@ public class ToolDefinitionEntity {
 	@Column(columnDefinition = "TEXT")
 	private String defaultArguments;
 
+	@Column(columnDefinition = "TEXT")
+	private String metadata;
+
 	@Column(nullable = false)
 	private Instant createdAt;
 
@@ -148,6 +151,14 @@ public class ToolDefinitionEntity {
 
 	public void setDefaultArguments(String defaultArguments) {
 		this.defaultArguments = defaultArguments;
+	}
+
+	public String getMetadata() {
+		return metadata;
+	}
+
+	public void setMetadata(String metadata) {
+		this.metadata = metadata;
 	}
 
 	public Instant getCreatedAt() {

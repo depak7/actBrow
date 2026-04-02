@@ -10,29 +10,23 @@ import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
 @Entity
-@Table(name = "assistants")
-public class AssistantDefinitionEntity {
+@Table(name = "tenants")
+public class TenantEntity {
 
 	@Id
 	private String id;
 
-	@Column(name = "assistant_key", nullable = false, unique = true)
+	@Column(name = "tenant_key", nullable = false, unique = true)
 	private String key;
 
 	@Column(nullable = false)
 	private String name;
 
-	@Column(length = 4_000)
-	private String systemPrompt;
+	@Column(nullable = false, unique = true)
+	private String apiKey;
 
 	@Column(nullable = false)
-	private String model;
-
-	@Column(nullable = false)
-	private boolean usePredefinedFlows;
-
-	@Column(name = "tenant_id")
-	private String tenantId;
+	private boolean enabled;
 
 	@Column(nullable = false)
 	private Instant createdAt;
@@ -71,36 +65,20 @@ public class AssistantDefinitionEntity {
 		this.name = name;
 	}
 
-	public String getSystemPrompt() {
-		return systemPrompt;
+	public String getApiKey() {
+		return apiKey;
 	}
 
-	public void setSystemPrompt(String systemPrompt) {
-		this.systemPrompt = systemPrompt;
+	public void setApiKey(String apiKey) {
+		this.apiKey = apiKey;
 	}
 
-	public String getModel() {
-		return model;
+	public boolean isEnabled() {
+		return enabled;
 	}
 
-	public void setModel(String model) {
-		this.model = model;
-	}
-
-	public boolean isUsePredefinedFlows() {
-		return usePredefinedFlows;
-	}
-
-	public void setUsePredefinedFlows(boolean usePredefinedFlows) {
-		this.usePredefinedFlows = usePredefinedFlows;
-	}
-
-	public String getTenantId() {
-		return tenantId;
-	}
-
-	public void setTenantId(String tenantId) {
-		this.tenantId = tenantId;
+	public void setEnabled(boolean enabled) {
+		this.enabled = enabled;
 	}
 
 	public Instant getCreatedAt() {

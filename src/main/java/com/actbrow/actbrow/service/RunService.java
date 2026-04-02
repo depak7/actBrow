@@ -41,13 +41,16 @@ public class RunService {
 	private final RunEventBroker eventBroker;
 	private final PendingClientToolStore pendingClientToolStore;
 	private final BuiltinServerToolExecutor builtinServerToolExecutor;
+	private final HttpServerToolExecutor httpServerToolExecutor;
+	private final NavigationFlowService navigationFlowService;
 	private final ActbrowProperties properties;
 	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
 		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
-		BuiltinServerToolExecutor builtinServerToolExecutor, ActbrowProperties properties) {
+		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
+		NavigationFlowService navigationFlowService, ActbrowProperties properties) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
 		this.conversationService = conversationService;
@@ -57,6 +60,8 @@ public class RunService {
 		this.eventBroker = eventBroker;
 		this.pendingClientToolStore = pendingClientToolStore;
 		this.builtinServerToolExecutor = builtinServerToolExecutor;
+		this.httpServerToolExecutor = httpServerToolExecutor;
+		this.navigationFlowService = navigationFlowService;
 		this.properties = properties;
 	}
 
@@ -109,12 +114,13 @@ public class RunService {
 		try {
 			AssistantDefinitionEntity assistant = assistantService.requireEntity(run.getAssistantId());
 			List<ToolDescriptor> tools = toolService.listDescriptorsForAssistant(assistant.getId());
+			String systemPrompt = buildSystemPrompt(assistant, run.getConversationId());
 
 			for (int stepIndex = 0; stepIndex < properties.maxSteps(); stepIndex++) {
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
 
-				ModelDecision decision = modelProvider.decideNextStep(assistant.getModel(), assistant.getSystemPrompt(),
+				ModelDecision decision = modelProvider.decideNextStep(assistant.getModel(), systemPrompt,
 					conversationService.listMessages(run.getConversationId()), tools, stepIndex);
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 
@@ -179,6 +185,9 @@ public class RunService {
 			runRepository.save(run);
 			return result;
 		}
+		if (tool.type() == ToolType.SERVER_HTTP) {
+			return httpServerToolExecutor.execute(tool, executionArguments);
+		}
 		return builtinServerToolExecutor.execute(tool, executionArguments);
 	}
 
@@ -218,5 +227,46 @@ public class RunService {
 	private RunResponse toResponse(RunEntity run) {
 		return new RunResponse(run.getId(), run.getConversationId(), run.getAssistantId(), run.getStatus(),
 			run.getStepCount(), run.getLastError(), run.getCreatedAt(), run.getCompletedAt());
+	}
+
+	private String buildSystemPrompt(AssistantDefinitionEntity assistant, String conversationId) {
+		StringBuilder prompt = new StringBuilder();
+		
+		if (assistant.getSystemPrompt() != null && !assistant.getSystemPrompt().isBlank()) {
+			prompt.append(assistant.getSystemPrompt()).append("\n\n");
+		}
+
+		if (assistant.isUsePredefinedFlows()) {
+			try {
+				var flows = navigationFlowService.listEnabledFlows(assistant.getId());
+				if (!flows.isEmpty()) {
+					prompt.append("NAVIGATION FLOWS AVAILABLE:\n");
+					prompt.append("When the user request matches a flow's trigger phrase, follow the defined steps in order.\n\n");
+					
+					for (var flow : flows) {
+						prompt.append("Flow: ").append(flow.name()).append("\n");
+						prompt.append("Trigger: ").append(flow.triggerPhrase()).append("\n");
+						prompt.append("Steps:\n");
+						for (int i = 0; i < flow.steps().size(); i++) {
+							var step = flow.steps().get(i);
+							prompt.append("  ").append(i + 1).append(". ").append(step.action())
+								.append(" -> ").append(step.target());
+							if (step.description() != null && !step.description().isBlank()) {
+								prompt.append(" (").append(step.description()).append(")");
+							}
+							prompt.append("\n");
+						}
+						prompt.append("\n");
+					}
+					
+					prompt.append("INSTRUCTION: When user request matches a flow trigger, execute each step sequentially using the appropriate tools (app.navigate, dom.click, dom.type, etc.). Do not skip steps.\n\n");
+				}
+			}
+			catch (Exception e) {
+				// Ignore errors in loading flows, continue with basic prompt
+			}
+		}
+
+		return prompt.toString();
 	}
 }

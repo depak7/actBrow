@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties({
 	ActbrowProperties.class,
 	GeminiProperties.class,
+	GroqProperties.class,
 	LlmProperties.class,
 	CorsProperties.class
 })

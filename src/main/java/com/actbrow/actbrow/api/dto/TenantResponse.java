@@ -2,14 +2,12 @@ package com.actbrow.actbrow.api.dto;
 
 import java.time.Instant;
 
-public record AssistantResponse(
+public record TenantResponse(
 	String id,
 	String key,
 	String name,
-	String systemPrompt,
-	String model,
-	boolean usePredefinedFlows,
-	String tenantId,
+	String apiKey,
+	boolean enabled,
 	Instant createdAt
 ) {
 }

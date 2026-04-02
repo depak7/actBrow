@@ -60,6 +60,24 @@ public class ToolService {
 		}
 	}
 
+	public void attachHttpTools(String assistantId) {
+		for (ToolResponse tool : list()) {
+			if (tool.type().name().equals("SERVER_HTTP")
+				&& tool.executorRef() != null
+				&& tool.key().equals(tool.executorRef())) {
+				bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
+					existing -> {
+					},
+					() -> {
+						AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
+						entity.setAssistantId(assistantId);
+						entity.setToolId(tool.id());
+						bindingRepository.save(entity);
+					});
+			}
+		}
+	}
+
 	public ToolResponse update(String id, ToolRequest request) {
 		ToolDefinitionEntity entity = requireEntity(id);
 		if (!entity.getKey().equals(request.key())) {
@@ -76,6 +94,8 @@ public class ToolService {
 			: jsonSchemaValidator.normalizeObject(request.outputSchema(), "outputSchema");
 		String defaultArguments = request.defaultArguments() == null ? null
 			: jsonSchemaValidator.normalizeObject(request.defaultArguments(), "defaultArguments");
+		String metadata = request.metadata() == null ? null
+			: jsonSchemaValidator.normalizeObject(request.metadata(), "metadata");
 		entity.setKey(request.key());
 		entity.setDisplayName(request.displayName());
 		entity.setDescription(request.description());
@@ -86,6 +106,7 @@ public class ToolService {
 		entity.setEnabled(request.enabled());
 		entity.setExecutorRef(request.executorRef());
 		entity.setDefaultArguments(defaultArguments);
+		entity.setMetadata(metadata);
 		return toResponse(toolRepository.save(entity));
 	}
 
@@ -130,7 +151,8 @@ public class ToolService {
 			.filter(ToolDefinitionEntity::isEnabled)
 			.map(tool -> new ToolDescriptor(tool.getId(), tool.getKey(), tool.getDescription(), tool.getInputSchema(),
 				tool.getType(), tool.getExecutorRef(),
-				tool.getDefaultArguments() == null ? Map.of() : jsonSchemaValidator.parseObject(tool.getDefaultArguments())))
+				tool.getDefaultArguments() == null ? Map.of() : jsonSchemaValidator.parseObject(tool.getDefaultArguments()),
+				tool.getMetadata() == null ? Map.of() : jsonSchemaValidator.parseObject(tool.getMetadata())))
 			.toList();
 	}
 
@@ -151,6 +173,7 @@ public class ToolService {
 			entity.getType(), entity.getVersion(),
 			entity.isEnabled(), entity.getExecutorRef(),
 			entity.getDefaultArguments() == null ? null : jsonSchemaValidator.parseObject(entity.getDefaultArguments()),
+			entity.getMetadata() == null ? Map.of() : jsonSchemaValidator.parseObject(entity.getMetadata()),
 			entity.getCreatedAt());
 	}
 }
