@@ -1,6 +1,5 @@
 package com.actbrow.actbrow.config;
 
-import java.io.IOException;
 import java.util.List;
 
 import org.springframework.core.Ordered;
@@ -16,15 +15,17 @@ import com.actbrow.actbrow.service.TenantService;
 import reactor.core.publisher.Mono;
 
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 1)
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final List<String> EXCLUDED_PATHS = List.of(
 		"/v1/tenants/validate-key",
 		"/v1/tenants",
+		"/v1/waitlist",
 		"/actbrow-sdk.js",
 		"/actbrow-widget.js",
-		"/h2-console");
+		"/h2-console",
+		"/auth/");
 
 	private final TenantService tenantService;
 
@@ -36,18 +37,22 @@ public class ApiKeyAuthFilter implements WebFilter {
 	public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
 		String path = exchange.getRequest().getPath().value();
 
-		// Allow CORS preflight requests to pass through
+		// Allow CORS preflight requests
 		if ("OPTIONS".equalsIgnoreCase(exchange.getRequest().getMethod().name())) {
 			return chain.filter(exchange);
 		}
 
+		// Skip authentication for excluded paths
 		if (isExcluded(path)) {
+			System.out.println("ALLOWED (excluded): " + path);
 			return chain.filter(exchange);
 		}
 
+		// Extract and validate API key for /v1/** endpoints
 		String apiKey = extractApiKey(exchange);
 
 		if (apiKey == null || apiKey.isBlank()) {
+			System.out.println("BLOCKED (no API key): " + path);
 			return unauthorized(exchange, "Missing API key");
 		}
 
@@ -56,6 +61,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 			if (!tenant.isEnabled()) {
 				return unauthorized(exchange, "Tenant is disabled");
 			}
+			// Add tenant info to request headers for downstream use
 			ServerWebExchange authenticatedExchange = exchange.mutate()
 				.request(exchange.getRequest().mutate()
 					.header("X-Tenant-Id", tenant.getId())

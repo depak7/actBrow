@@ -20,38 +20,16 @@ public class TenantService {
 		this.tenantRepository = tenantRepository;
 	}
 
-	public TenantResponse create(TenantRequest request, String userId) {
+	public TenantResponse create(TenantRequest request) {
 		tenantRepository.findByKey(request.key()).ifPresent(existing -> {
 			throw new IllegalArgumentException("Tenant key already exists");
 		});
 
-		// Check if user already has a tenant (one tenant per user)
-		if (tenantRepository.existsByUserId(userId)) {
-			throw new IllegalStateException("User already has a tenant. Only one tenant per user is allowed.");
-		}
-
 		TenantEntity entity = new TenantEntity();
 		entity.setKey(request.key());
 		entity.setName(request.name());
-		entity.setUserId(userId);
 		entity.setApiKey(generateApiKey(request.apiKey()));
 		entity.setEnabled(request.enabled());
-		return toResponse(tenantRepository.save(entity));
-	}
-
-	public TenantResponse createForUser(String name, String userId) {
-		// Check if user already has a tenant
-		if (tenantRepository.existsByUserId(userId)) {
-			throw new IllegalStateException("User already has a tenant. Only one tenant per user is allowed.");
-		}
-
-		TenantEntity entity = new TenantEntity();
-		String key = name.toLowerCase().replaceAll("\\s+", "-");
-		entity.setKey(key);
-		entity.setName(name);
-		entity.setUserId(userId);
-		entity.setApiKey(generateApiKey(null));
-		entity.setEnabled(true);
 		return toResponse(tenantRepository.save(entity));
 	}
 
@@ -81,10 +59,6 @@ public class TenantService {
 
 	public List<TenantResponse> list() {
 		return tenantRepository.findAll().stream().map(this::toResponse).toList();
-	}
-
-	public List<TenantResponse> listByUserId(String userId) {
-		return tenantRepository.findAllByUserId(userId).stream().map(this::toResponse).toList();
 	}
 
 	public TenantResponse getTenant(String tenantId) {

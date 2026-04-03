@@ -4,8 +4,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,9 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.actbrow.actbrow.api.dto.TenantRequest;
 import com.actbrow.actbrow.api.dto.TenantResponse;
-import com.actbrow.actbrow.model.UserEntity;
 import com.actbrow.actbrow.service.TenantService;
-import com.actbrow.actbrow.service.UserService;
 
 import jakarta.validation.Valid;
 
@@ -28,17 +24,14 @@ import jakarta.validation.Valid;
 public class TenantController {
 
 	private final TenantService tenantService;
-	private final UserService userService;
 
-	public TenantController(TenantService tenantService, UserService userService) {
+	public TenantController(TenantService tenantService) {
 		this.tenantService = tenantService;
-		this.userService = userService;
 	}
 
 	@GetMapping
-	public List<TenantResponse> listTenants(@AuthenticationPrincipal OidcUser user) {
-		UserEntity userEntity = userService.findOrCreateUser(user);
-		return tenantService.listByUserId(userEntity.getId());
+	public List<TenantResponse> listTenants() {
+		return tenantService.list();
 	}
 
 	@GetMapping("/{tenantId}")
@@ -47,12 +40,8 @@ public class TenantController {
 	}
 
 	@PostMapping
-	public ResponseEntity<TenantResponse> createTenant(
-		@Valid @RequestBody TenantRequest request,
-		@AuthenticationPrincipal OidcUser user
-	) {
-		UserEntity userEntity = userService.findOrCreateUser(user);
-		return ResponseEntity.ok(tenantService.create(request, userEntity.getId()));
+	public ResponseEntity<TenantResponse> createTenant(@Valid @RequestBody TenantRequest request) {
+		return ResponseEntity.ok(tenantService.create(request));
 	}
 
 	@PutMapping("/{tenantId}")

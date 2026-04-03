@@ -20,7 +20,7 @@ public class AssistantService {
 		this.toolService = toolService;
 	}
 
-	public AssistantResponse createOrUpdate(CreateAssistantRequest request, String userId) {
+	public AssistantResponse createOrUpdate(CreateAssistantRequest request) {
 		AssistantDefinitionEntity entity = assistantRepository.findByKey(request.key()).orElse(null);
 		if(entity == null){
 			entity = new AssistantDefinitionEntity();

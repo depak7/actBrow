@@ -133,7 +133,22 @@
 
     function request(path, options) {
       debugLog(config, "request", path, options && options.method ? options.method : "GET");
-      return fetch(config.baseUrl + path, options).then(function (response) {
+      
+      // Add API key to headers if provided
+      var headers = options && options.headers ? options.headers : {};
+      if (config.apiKey) {
+        headers["Authorization"] = "Bearer " + config.apiKey;
+        headers["X-API-Key"] = config.apiKey;
+      }
+      if (!headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+      
+      var fetchOptions = Object.assign({}, options, {
+        headers: headers
+      });
+      
+      return fetch(config.baseUrl + path, fetchOptions).then(function (response) {
         if (!response.ok) {
           return response.json().catch(function () { return {}; }).then(function (body) {
             debugLog(config, "request failed", path, response.status, body);

@@ -25,6 +25,7 @@
     var config = global.ActbrowWidgetConfig || {};
     var assistantId = config.assistantId || (script && script.getAttribute("data-assistant-id"));
     var baseUrl = config.baseUrl || (script && script.getAttribute("data-base-url"));
+    var apiKey = config.apiKey || (script && script.getAttribute("data-api-key"));
     var debug = typeof config.debug === "boolean"
       ? config.debug
       : !!(script && script.getAttribute("data-debug") === "true");
@@ -35,6 +36,7 @@
     global.ActbrowWidget = global.Actbrow.createActbrowWidget({
       assistantId: assistantId,
       baseUrl: baseUrl || (global.location ? global.location.origin : ""),
+      apiKey: apiKey,
       debug: debug
     });
   }
