@@ -19,6 +19,7 @@ import reactor.core.publisher.Mono;
 public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final List<String> EXCLUDED_PATHS = List.of(
+		"/health",
 		"/v1/tenants/validate-key",
 		"/v1/tenants",
 		"/v1/waitlist",
