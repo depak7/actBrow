@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.api.dto.ToolRequest;
@@ -86,6 +87,13 @@ public class ToolService {
 			});
 		}
 		return saveNewEntity(entity, request);
+	}
+
+	@Transactional
+	public void delete(String toolId) {
+		requireEntity(toolId);
+		bindingRepository.deleteAll(bindingRepository.findAllByToolId(toolId));
+		toolRepository.deleteById(toolId);
 	}
 
 	private ToolResponse saveNewEntity(ToolDefinitionEntity entity, ToolRequest request) {

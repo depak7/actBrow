@@ -1,5 +1,7 @@
 package com.actbrow.actbrow.agent;
 
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -7,9 +9,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import com.actbrow.actbrow.config.GeminiProperties;
 import com.actbrow.actbrow.model.ConversationMessageEntity;
@@ -25,15 +33,23 @@ public class GeminiModelProvider implements ModelProvider {
 	private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
 	};
 
-	private final WebClient webClient;
+	private final RestTemplate restTemplate;
 	private final ObjectMapper objectMapper;
 	private final GeminiProperties properties;
 
-	public GeminiModelProvider(WebClient.Builder webClientBuilder, ObjectMapper objectMapper,
-		GeminiProperties properties) {
+	public GeminiModelProvider(ObjectMapper objectMapper, GeminiProperties properties) {
 		this.objectMapper = objectMapper;
 		this.properties = properties;
-		this.webClient = webClientBuilder.baseUrl(properties.baseUrl()).build();
+		this.restTemplate = createRestTemplate(resolveTimeout(properties));
+	}
+
+	private static RestTemplate createRestTemplate(Duration readTimeout) {
+		HttpClient httpClient = HttpClient.newBuilder()
+			.connectTimeout(Duration.ofSeconds(10))
+			.build();
+		JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+		factory.setReadTimeout(readTimeout);
+		return new RestTemplate(factory);
 	}
 
 	@Override
@@ -49,18 +65,30 @@ public class GeminiModelProvider implements ModelProvider {
 		}
 
 		String resolvedModel = model == null || model.isBlank() ? properties.defaultModel() : model;
-		String responseBody = webClient.post()
-			.uri(uriBuilder -> uriBuilder.path("/models/{model}:generateContent")
-				.queryParam("key", properties.apiKey())
-				.build(resolvedModel))
-			.bodyValue(buildRequest(systemPrompt, messages, tools, stepIndex))
-			.retrieve()
-			.bodyToMono(String.class)
-			.timeout(resolveTimeout())
-			.onErrorMap(WebClientResponseException.class, exception -> new IllegalArgumentException(
-				"Gemini request failed with status %s: %s".formatted(exception.getStatusCode(), exception.getResponseBodyAsString()),
-				exception))
-			.block();
+		URI uri = UriComponentsBuilder.fromUriString(trimTrailingSlash(properties.baseUrl()))
+			.path("/models/{model}:generateContent")
+			.queryParam("key", properties.apiKey())
+			.buildAndExpand(resolvedModel)
+			.encode()
+			.toUri();
+
+		HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(MediaType.APPLICATION_JSON);
+
+		String responseBody;
+		try {
+			responseBody = restTemplate.exchange(
+				uri,
+				HttpMethod.POST,
+				new HttpEntity<>(buildRequest(systemPrompt, messages, tools, stepIndex), headers),
+				String.class).getBody();
+		}
+		catch (HttpStatusCodeException exception) {
+			throw new IllegalArgumentException(
+				"Gemini request failed with status %s: %s".formatted(exception.getStatusCode(),
+					exception.getResponseBodyAsString()),
+				exception);
+		}
 
 		try {
 			return parseDecision(responseBody, tools);
@@ -70,7 +98,11 @@ public class GeminiModelProvider implements ModelProvider {
 		}
 	}
 
-	private Duration resolveTimeout() {
+	private static String trimTrailingSlash(String base) {
+		return base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+	}
+
+	private static Duration resolveTimeout(GeminiProperties properties) {
 		return properties.requestTimeout() == null ? Duration.ofSeconds(20) : properties.requestTimeout();
 	}
 
@@ -103,6 +135,9 @@ public class GeminiModelProvider implements ModelProvider {
 		builder.append("If a provided tool is required, return exactly one function call. ");
 		builder.append("If no tool is required, return a concise final answer in plain text. ");
 		builder.append("Use only the declared functions. Do not invent tool names. ");
+		builder.append("Do not answer with plain text that mimics a tool call ");
+		builder.append("(e.g. app.navigate{...} or {\"type\":\"function\",\"name\":...}); use a real functionCall. ");
+		builder.append("When several navigation tools exist, prefer the one whose description matches the request. ");
 		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer.");
 		return builder.toString();
 	}
@@ -123,10 +158,13 @@ public class GeminiModelProvider implements ModelProvider {
 
 	private List<Map<String, Object>> buildFunctionDeclarations(List<ToolDescriptor> tools) {
 		return tools.stream()
-			.map(tool -> Map.of(
-				"name", tool.key(),
-				"description", tool.description(),
-				"parameters", parseSchema(tool.inputSchema())))
+			.map(tool -> {
+				Map<String, Object> decl = new LinkedHashMap<>();
+				decl.put("name", tool.key());
+				decl.put("description", ModelToolPresentation.descriptionForModel(tool, objectMapper));
+				decl.put("parameters", parseSchema(tool.inputSchema()));
+				return decl;
+			})
 			.toList();
 	}
 
@@ -178,6 +216,11 @@ public class GeminiModelProvider implements ModelProvider {
 		if (text.isEmpty()) {
 			throw new IllegalArgumentException("Gemini returned neither text nor function call");
 		}
-		return new FinalResponseDecision(text.toString());
+		String joined = text.toString();
+		ToolCallDecision recovered = PlainTextToolCallRecovery.tryRecover(joined, tools, objectMapper);
+		if (recovered != null) {
+			return recovered;
+		}
+		return new FinalResponseDecision(joined);
 	}
 }

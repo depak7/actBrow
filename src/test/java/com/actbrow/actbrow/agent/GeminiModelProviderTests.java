@@ -10,7 +10,6 @@ import java.util.Map;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import com.actbrow.actbrow.config.GeminiProperties;
 import com.actbrow.actbrow.model.ConversationMessageEntity;
@@ -82,7 +81,7 @@ class GeminiModelProviderTests {
 	}
 
 	private static GeminiModelProvider provider() {
-		return new GeminiModelProvider(WebClient.builder(), new ObjectMapper().findAndRegisterModules(),
+		return new GeminiModelProvider(new ObjectMapper().findAndRegisterModules(),
 			new GeminiProperties("test-key", GEMINI_SERVER.url("/v1beta").toString().replaceAll("/$", ""),
 				"gemini-2.0-flash", Duration.ofSeconds(5)));
 	}

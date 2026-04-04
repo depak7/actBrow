@@ -54,6 +54,12 @@ public class ToolController {
 		return toolService.update(toolId, request);
 	}
 
+	@DeleteMapping("/tools/{toolId}")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public void delete(@PathVariable String toolId) {
+		toolService.delete(toolId);
+	}
+
 	@GetMapping("/tools")
 	public List<ToolResponse> list() {
 		return toolService.list();

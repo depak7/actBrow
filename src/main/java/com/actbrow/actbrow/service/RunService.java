@@ -203,7 +203,29 @@ public class RunService {
 		if (runtimeArguments != null) {
 			merged.putAll(runtimeArguments);
 		}
+		// Dedicated nav tools (e.g. app.navigate.profile) carry a fixed path; do not let the model override it.
+		if (isDedicatedClientNavigateTool(tool)) {
+			Object fixedPath = tool.defaultArguments().get("path");
+			if (fixedPath != null && !String.valueOf(fixedPath).isBlank()) {
+				merged.put("path", fixedPath);
+			}
+		}
 		return merged;
+	}
+
+	private static boolean isDedicatedClientNavigateTool(ToolDescriptor tool) {
+		if (tool.type() != ToolType.CLIENT) {
+			return false;
+		}
+		if (!"app.navigate".equals(tool.executorRef())) {
+			return false;
+		}
+		if ("app.navigate".equals(tool.key())) {
+			return false;
+		}
+		Map<String, Object> defs = tool.defaultArguments();
+		return defs != null && defs.containsKey("path") && defs.get("path") != null
+			&& !String.valueOf(defs.get("path")).isBlank();
 	}
 
 	private void failRun(RunEntity run, String error) {

@@ -82,9 +82,14 @@ public class ApiKeyAuthFilter implements WebFilter {
 	private String extractApiKey(ServerWebExchange exchange) {
 		String authHeader = exchange.getRequest().getHeaders().getFirst("Authorization");
 		if (authHeader != null && authHeader.startsWith("Bearer ")) {
-			return authHeader.substring(7);
+			return authHeader.substring(7).trim();
 		}
-		return exchange.getRequest().getHeaders().getFirst("X-API-Key");
+		String headerKey = exchange.getRequest().getHeaders().getFirst("X-API-Key");
+		if (headerKey != null && !headerKey.isBlank()) {
+			return headerKey.trim();
+		}
+		// Browser EventSource does not support custom headers; clients may pass apiKey as a query param.
+		return exchange.getRequest().getQueryParams().getFirst("apiKey");
 	}
 
 	private Mono<Void> unauthorized(ServerWebExchange exchange, String message) {

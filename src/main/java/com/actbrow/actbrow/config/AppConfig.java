@@ -11,7 +11,6 @@ import org.springframework.core.annotation.Order;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.reactive.CorsWebFilter;
 import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -19,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties({
 	ActbrowProperties.class,
 	GeminiProperties.class,
+	GoogleOAuthProperties.class,
 	GroqProperties.class,
 	LlmProperties.class,
 	CorsProperties.class
@@ -28,11 +28,6 @@ public class AppConfig {
 	@Bean
 	ObjectMapper objectMapper() {
 		return new ObjectMapper().findAndRegisterModules();
-	}
-
-	@Bean
-	WebClient.Builder webClientBuilder() {
-		return WebClient.builder();
 	}
 
 	@Bean

@@ -129,16 +129,63 @@
 
     var emitter = createEmitter();
     var tools = builtInTools(config);
-    var currentConversationId = null;
+
+    function conversationStorageKey() {
+      try {
+        var base = config.baseUrl || "";
+        if (typeof base === "string" && base.indexOf("/") === 0) {
+          base = (typeof window !== "undefined" && window.location ? window.location.origin : "") + base;
+        }
+        return "actbrow:conv:" + String(base) + ":" + config.assistantId;
+      } catch (e) {
+        return "actbrow:conv:" + config.assistantId;
+      }
+    }
+
+    var convStorageKey = conversationStorageKey();
+
+    function readStoredConversationId() {
+      try {
+        return sessionStorage.getItem(convStorageKey);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function writeStoredConversationId(id) {
+      try {
+        if (id) {
+          sessionStorage.setItem(convStorageKey, id);
+        }
+      } catch (e) {}
+    }
+
+    function clearStoredConversationId() {
+      try {
+        sessionStorage.removeItem(convStorageKey);
+      } catch (e) {}
+    }
+
+    var currentConversationId = readStoredConversationId();
+
+    function normalizeApiKey(key) {
+      if (key == null) {
+        return "";
+      }
+      var s = String(key).trim();
+      return s;
+    }
+
+    var resolvedApiKey = normalizeApiKey(config.apiKey);
 
     function request(path, options) {
       debugLog(config, "request", path, options && options.method ? options.method : "GET");
-      
-      // Add API key to headers if provided
-      var headers = options && options.headers ? options.headers : {};
-      if (config.apiKey) {
-        headers["Authorization"] = "Bearer " + config.apiKey;
-        headers["X-API-Key"] = config.apiKey;
+
+      // Copy headers so we never mutate the caller's object; add auth when key is set
+      var headers = options && options.headers ? Object.assign({}, options.headers) : {};
+      if (resolvedApiKey) {
+        headers["Authorization"] = "Bearer " + resolvedApiKey;
+        headers["X-API-Key"] = resolvedApiKey;
       }
       if (!headers["Content-Type"]) {
         headers["Content-Type"] = "application/json";
@@ -217,7 +264,12 @@
     }
 
     function streamRun(runId) {
-      var source = new EventSource(config.baseUrl + "/v1/runs/" + runId + "/events");
+      // EventSource cannot send Authorization / X-API-Key; server accepts ?apiKey= for this path
+      var eventsUrl = config.baseUrl + "/v1/runs/" + runId + "/events";
+      if (resolvedApiKey) {
+        eventsUrl += (eventsUrl.indexOf("?") >= 0 ? "&" : "?") + "apiKey=" + encodeURIComponent(resolvedApiKey);
+      }
+      var source = new EventSource(eventsUrl);
       debugLog(config, "opening run stream", runId);
       source.onopen = function () {
         debugLog(config, "run stream open", runId);
@@ -254,8 +306,21 @@
           body: JSON.stringify({ assistantId: config.assistantId })
         }).then(function (conversation) {
           currentConversationId = conversation.id;
+          writeStoredConversationId(conversation.id);
           return conversation;
         });
+      },
+      listMessages: function (conversationId) {
+        return request("/v1/conversations/" + conversationId + "/messages", {
+          method: "GET"
+        });
+      },
+      getConversationId: function () {
+        return currentConversationId;
+      },
+      clearStoredConversation: function () {
+        clearStoredConversationId();
+        currentConversationId = null;
       },
       sendMessage: function (message) {
         var ensureConversation = currentConversationId
@@ -499,6 +564,7 @@
     var client = createActbrowClient({
       baseUrl: config.baseUrl,
       assistantId: config.assistantId,
+      apiKey: config.apiKey,
       debug: !!config.debug
     });
     global.ActbrowWidgetClient = client;
@@ -507,6 +573,7 @@
     var thinkingRow = null;
     var statusMode = "idle";
     var hasSubmittedMessage = false;
+    var panelHydrated = false;
 
     function escapeHtml(value) {
       return String(value)
@@ -658,19 +725,68 @@
       isOpen = true;
       panel.classList.remove("actbrow-widget-hidden");
       launcher.setAttribute("aria-expanded", "true");
+
+      function finishOpen() {
+        if (!hasSubmittedMessage) {
+          renderEmptyState();
+        } else {
+          removeEmptyState();
+        }
+        input.focus();
+      }
+
+      function addWelcomeIfNeeded() {
+        if (!messages.childElementCount) {
+          var welcomeRow = appendRow("assistant", labels.assistant || "Assistant");
+          var welcomeItem = document.createElement("div");
+          welcomeItem.className = "actbrow-widget-message actbrow-widget-message-assistant";
+          welcomeItem.innerHTML =
+            '<strong>' +
+            escapeHtml(labels.welcomeTitle || "Hi there! 👋") +
+            "</strong><br/>" +
+            escapeHtml(labels.welcome || "I can answer questions and also navigate and act inside this page.");
+          welcomeRow.appendChild(welcomeItem);
+        }
+      }
+
+      if (!panelHydrated) {
+        panelHydrated = true;
+        var cid = client.getConversationId();
+        if (cid) {
+          client
+            .listMessages(cid)
+            .then(function (rows) {
+              if (rows && rows.length) {
+                hasSubmittedMessage = true;
+                rows.forEach(function (m) {
+                  var role = (m.role || "").toUpperCase();
+                  if (role === "USER") {
+                    appendMessage("user", m.content);
+                  } else if (role === "ASSISTANT") {
+                    appendMessage("assistant", m.content);
+                  } else if (role === "TOOL") {
+                    appendToolActivity("Tool", m.content);
+                  }
+                });
+                scrollToBottom();
+              } else {
+                addWelcomeIfNeeded();
+              }
+              finishOpen();
+            })
+            .catch(function () {
+              client.clearStoredConversation();
+              addWelcomeIfNeeded();
+              finishOpen();
+            });
+          return;
+        }
+      }
+
       if (!messages.childElementCount) {
-        var welcomeRow = appendRow("assistant", labels.assistant || "Assistant");
-        var welcomeItem = document.createElement("div");
-        welcomeItem.className = "actbrow-widget-message actbrow-widget-message-assistant";
-        welcomeItem.innerHTML = '<strong>' + escapeHtml(labels.welcomeTitle || "Hi there! 👋") + '</strong><br/>' + escapeHtml(labels.welcome || "I can answer questions and also navigate and act inside this page.");
-        welcomeRow.appendChild(welcomeItem);
+        addWelcomeIfNeeded();
       }
-      if (!hasSubmittedMessage) {
-        renderEmptyState();
-      } else {
-        removeEmptyState();
-      }
-      input.focus();
+      finishOpen();
     }
 
     function closePanel() {
