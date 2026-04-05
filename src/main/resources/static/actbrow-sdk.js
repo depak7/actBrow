@@ -266,6 +266,7 @@
     }
 
     var currentConversationId = readStoredConversationId();
+    var activeRunEventSource = null;
 
     function normalizeApiKey(key) {
       if (key == null) {
@@ -363,22 +364,37 @@
     }
 
     function streamRun(runId) {
+      if (activeRunEventSource) {
+        try {
+          activeRunEventSource.close();
+        } catch (e) {}
+        activeRunEventSource = null;
+      }
       // EventSource cannot send Authorization / X-API-Key; server accepts ?apiKey= for this path
       var eventsUrl = config.baseUrl + "/v1/runs/" + runId + "/events";
       if (resolvedApiKey) {
         eventsUrl += (eventsUrl.indexOf("?") >= 0 ? "&" : "?") + "apiKey=" + encodeURIComponent(resolvedApiKey);
       }
       var source = new EventSource(eventsUrl);
+      activeRunEventSource = source;
       debugLog(config, "opening run stream", runId);
       source.onopen = function () {
         debugLog(config, "run stream open", runId);
       };
+      function endStream() {
+        if (activeRunEventSource === source) {
+          activeRunEventSource = null;
+        }
+        try {
+          source.close();
+        } catch (e) {}
+      }
       ["run.started", "tool.call.requested", "tool.call.completed", "assistant.message.completed", "run.failed"]
         .forEach(function (eventName) {
           source.addEventListener(eventName, function (event) {
             handleRunEvent(runId, event);
             if (eventName === "assistant.message.completed" || eventName === "run.failed") {
-              source.close();
+              endStream();
             }
           });
         });
@@ -417,9 +433,40 @@
       getConversationId: function () {
         return currentConversationId;
       },
+      /** Re-read the persisted conversation id (e.g. after navigation or bfcache restore). */
+      syncConversationIdFromStorage: function () {
+        currentConversationId = readStoredConversationId();
+      },
       clearStoredConversation: function () {
+        if (activeRunEventSource) {
+          try {
+            activeRunEventSource.close();
+          } catch (e) {}
+          activeRunEventSource = null;
+        }
         clearStoredConversationId();
         currentConversationId = null;
+      },
+      /**
+       * Closes the run event stream, clears local persistence immediately (so navigation / reopen cannot
+       * resurrect the old thread), then DELETE on the server. Server errors are ignored.
+       */
+      resetConversationForNewChat: function () {
+        if (activeRunEventSource) {
+          try {
+            activeRunEventSource.close();
+          } catch (e) {}
+          activeRunEventSource = null;
+        }
+        var id = currentConversationId || readStoredConversationId();
+        clearStoredConversationId();
+        currentConversationId = null;
+        if (!id) {
+          return Promise.resolve();
+        }
+        return request("/v1/conversations/" + encodeURIComponent(id), { method: "DELETE" }).catch(function () {
+          return null;
+        });
       },
       sendMessage: function (message) {
         var content;
@@ -447,6 +494,9 @@
         var body = { content: content };
         if (pageContextPayload != null) {
           body.pageContext = pageContextPayload;
+        }
+        if (!currentConversationId) {
+          currentConversationId = readStoredConversationId();
         }
         var ensureConversation = currentConversationId
           ? Promise.resolve({ id: currentConversationId })
@@ -511,6 +561,11 @@
       ".actbrow-widget-badge{display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:3px 8px;background:rgba(34,197,94,.15);border-radius:999px;border:1px solid rgba(34,197,94,.3);}",
       ".actbrow-widget-badge-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2);animation:actbrow-badge-pulse 2s ease-in-out infinite;}",
       ".actbrow-widget-badge-text{font-size:9px;font-weight:600;color:#4ade80;letter-spacing:.02em;}",
+      ".actbrow-widget-header-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;}",
+      ".actbrow-widget-clear-history{border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(255,255,255,.06);color:#b0b0b0;font-size:11px;font-weight:600;letter-spacing:.02em;cursor:pointer;padding:6px 10px;line-height:1.2;transition:all .2s ease;font-family:'Inter',sans-serif;white-space:nowrap;}",
+      ".actbrow-widget-clear-history:hover{background:rgba(255,255,255,.1);color:#e5e5e5;border-color:rgba(255,255,255,.18);}",
+      ".actbrow-widget-clear-history:active{transform:scale(.98);}",
+      ".actbrow-widget-clear-history:disabled{opacity:.45;cursor:not-allowed;transform:none;}",
       ".actbrow-widget-close{background:rgba(255,255,255,.08);border:none;color:#a0a0a0;font-size:20px;cursor:pointer;line-height:1;padding:6px;border-radius:10px;transition:all .2s ease;display:flex;align-items:center;justify-content:center;width:32px;height:32px;}",
       ".actbrow-widget-close:hover{background:rgba(255,255,255,.12);color:#e5e5e5;transform:rotate(90deg);}",
       ".actbrow-widget-close:active{transform:rotate(90deg) scale(.95);}",
@@ -634,12 +689,23 @@
       '<div class="actbrow-widget-badge"><span class="actbrow-widget-badge-dot"></span>' +
       '<span class="actbrow-widget-badge-text">' + escapeHtml(labels.badge || "Live in your app") + '</span></div></div>';
 
+    var headerActions = document.createElement("div");
+    headerActions.className = "actbrow-widget-header-actions";
+
+    var clearHistoryButton = document.createElement("button");
+    clearHistoryButton.type = "button";
+    clearHistoryButton.className = "actbrow-widget-clear-history";
+    clearHistoryButton.textContent = labels.clearHistory || "New chat";
+    clearHistoryButton.setAttribute("aria-label", labels.clearHistoryAria || "Start a new conversation");
+
     var closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.className = "actbrow-widget-close";
     closeButton.setAttribute("aria-label", labels.close || "Close assistant");
     closeButton.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
-    header.appendChild(closeButton);
+    headerActions.appendChild(clearHistoryButton);
+    headerActions.appendChild(closeButton);
+    header.appendChild(headerActions);
 
     var messages = document.createElement("div");
     messages.className = "actbrow-widget-messages";
@@ -703,6 +769,14 @@
     var statusMode = "idle";
     var hasSubmittedMessage = false;
     var panelHydrated = false;
+    if (typeof window !== "undefined") {
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted) {
+          client.syncConversationIdFromStorage();
+          panelHydrated = false;
+        }
+      });
+    }
 
     function escapeHtml(value) {
       return String(value)
@@ -727,6 +801,7 @@
       isSending = nextValue;
       input.disabled = nextValue;
       send.disabled = nextValue;
+      clearHistoryButton.disabled = nextValue;
     }
 
     function scrollToBottom() {
@@ -850,10 +925,47 @@
       }
     }
 
+    function addWelcomeIfNeeded() {
+      if (!messages.childElementCount) {
+        var welcomeRow = appendRow("assistant", labels.assistant || "Assistant");
+        var welcomeItem = document.createElement("div");
+        welcomeItem.className = "actbrow-widget-message actbrow-widget-message-assistant";
+        welcomeItem.innerHTML =
+          '<strong>' +
+          escapeHtml(labels.welcomeTitle || "Hi there! 👋") +
+          "</strong><br/>" +
+          escapeHtml(labels.welcome || "I can answer questions and also navigate and act inside this page.");
+        welcomeRow.appendChild(welcomeItem);
+      }
+    }
+
+    function beginNewConversation() {
+      removeThinkingRow();
+      thinkingRow = null;
+      while (messages.firstChild) {
+        messages.removeChild(messages.firstChild);
+      }
+      hasSubmittedMessage = false;
+      panelHydrated = false;
+      setStatus("");
+      clearHistoryButton.disabled = true;
+      input.disabled = true;
+      send.disabled = true;
+      client.resetConversationForNewChat().then(function () {
+        setSendingState(false);
+        if (isOpen) {
+          addWelcomeIfNeeded();
+          renderEmptyState();
+          scrollToBottom();
+        }
+      });
+    }
+
     function openPanel() {
       isOpen = true;
       panel.classList.remove("actbrow-widget-hidden");
       launcher.setAttribute("aria-expanded", "true");
+      client.syncConversationIdFromStorage();
 
       function finishOpen() {
         if (!hasSubmittedMessage) {
@@ -864,22 +976,11 @@
         input.focus();
       }
 
-      function addWelcomeIfNeeded() {
-        if (!messages.childElementCount) {
-          var welcomeRow = appendRow("assistant", labels.assistant || "Assistant");
-          var welcomeItem = document.createElement("div");
-          welcomeItem.className = "actbrow-widget-message actbrow-widget-message-assistant";
-          welcomeItem.innerHTML =
-            '<strong>' +
-            escapeHtml(labels.welcomeTitle || "Hi there! 👋") +
-            "</strong><br/>" +
-            escapeHtml(labels.welcome || "I can answer questions and also navigate and act inside this page.");
-          welcomeRow.appendChild(welcomeItem);
-        }
-      }
-
       if (!panelHydrated) {
         panelHydrated = true;
+        while (messages.firstChild) {
+          messages.removeChild(messages.firstChild);
+        }
         var cid = client.getConversationId();
         if (cid) {
           client
@@ -944,6 +1045,10 @@
       closePanel();
     });
 
+    clearHistoryButton.addEventListener("click", function () {
+      beginNewConversation();
+    });
+
     client.on("tool.call.requested", function (event) {
       if (event && event.payload) {
         ensureThinkingRow();
@@ -987,6 +1092,7 @@
       client: client,
       open: openPanel,
       close: closePanel,
+      beginNewConversation: beginNewConversation,
       destroy: function () {
         root.remove();
       }

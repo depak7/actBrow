@@ -9,4 +9,6 @@ import com.actbrow.actbrow.model.ConversationMessageEntity;
 public interface ConversationMessageRepository extends JpaRepository<ConversationMessageEntity, String> {
 
 	List<ConversationMessageEntity> findAllByConversationIdOrderByCreatedAtAsc(String conversationId);
+
+	void deleteByConversationId(String conversationId);
 }

@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
 
 import com.actbrow.actbrow.agent.FinalResponseDecision;
@@ -19,7 +20,6 @@ import com.actbrow.actbrow.agent.ToolExecutionResult;
 import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.actbrow.actbrow.config.ActbrowProperties;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
@@ -103,6 +103,25 @@ public class RunService {
 
 	public RunResponse getRun(String runId) {
 		return toResponse(requireRun(runId));
+	}
+
+	/**
+	 * Removes all runs, steps, messages, and the conversation row. Idempotent if the conversation is already gone.
+	 */
+	@Transactional
+	public void deleteConversationCascade(String conversationId) {
+		if (!conversationService.exists(conversationId)) {
+			return;
+		}
+		List<RunEntity> runs = runRepository.findAllByConversationId(conversationId);
+		for (RunEntity run : runs) {
+			String runId = run.getId();
+			startedRuns.remove(runId);
+			eventBroker.dispose(runId);
+			runStepRepository.deleteByRunId(runId);
+		}
+		runRepository.deleteAll(runs);
+		conversationService.deleteMessagesAndConversation(conversationId);
 	}
 
 	public void submitClientToolResult(String runId, String toolCallId, ToolExecutionResult result) {
@@ -268,11 +287,8 @@ public class RunService {
 			run.getStepCount(), run.getLastError(), run.getCreatedAt(), run.getCompletedAt());
 	}
 
-	private String composeUserTurnContent(String content, JsonNode pageContext) {
-		if (pageContext == null || pageContext.isNull()) {
-			return content;
-		}
-		if (pageContext.isObject() && pageContext.size() == 0) {
+	private String composeUserTurnContent(String content, Map<String, Object> pageContext) {
+		if (pageContext == null || pageContext.isEmpty()) {
 			return content;
 		}
 		try {

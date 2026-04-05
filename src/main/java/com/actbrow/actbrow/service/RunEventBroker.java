@@ -30,6 +30,17 @@ public class RunEventBroker {
 		sinks.computeIfAbsent(runId, ignored -> Sinks.many().replay().all()).tryEmitComplete();
 	}
 
+	/**
+	 * Completes any active stream and drops replay history for this run (e.g. conversation deleted).
+	 */
+	public void dispose(String runId) {
+		Sinks.Many<RunEventResponse> sink = sinks.remove(runId);
+		if (sink != null) {
+			sink.tryEmitComplete();
+		}
+		history.remove(runId);
+	}
+
 	public Flux<ServerSentEvent<RunEventResponse>> stream(String runId) {
 		return sinks.computeIfAbsent(runId, ignored -> {
 			Sinks.Many<RunEventResponse> sink = Sinks.many().replay().all();

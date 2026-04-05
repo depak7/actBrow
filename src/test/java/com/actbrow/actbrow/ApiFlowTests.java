@@ -446,6 +446,49 @@ class ApiFlowTests {
 		assertThat(assistantTools).extracting(ToolResponse::id).contains(tool.id());
 	}
 
+	@Test
+	void deleteConversationRemovesDataAndIsIdempotent() {
+		WebTestClient client = webTestClient();
+		AssistantResponse assistant = client.post()
+			.uri("/v1/assistants")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"key":"delete-conv-asst","name":"Delete Conv","systemPrompt":"x","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(AssistantResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		ConversationResponse conversation = client.post()
+			.uri("/v1/conversations")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"assistantId":"%s"}
+				""".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(ConversationResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		client.delete()
+			.uri("/v1/conversations/%s".formatted(conversation.id()))
+			.exchange()
+			.expectStatus().isNoContent();
+
+		client.delete()
+			.uri("/v1/conversations/%s".formatted(conversation.id()))
+			.exchange()
+			.expectStatus().isNoContent();
+
+		client.get()
+			.uri("/v1/conversations/%s/messages".formatted(conversation.id()))
+			.exchange()
+			.expectStatus().isBadRequest();
+	}
+
 	private static MockResponse jsonResponse(String body) {
 		return new MockResponse()
 			.setHeader("Content-Type", "application/json")

@@ -3,6 +3,7 @@ package com.actbrow.actbrow.service;
 import java.util.List;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.api.dto.ConversationRequest;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
@@ -37,6 +38,16 @@ public class ConversationService {
 	public ConversationEntity requireConversation(String conversationId) {
 		return conversationRepository.findById(conversationId)
 			.orElseThrow(() -> new IllegalArgumentException("Conversation not found"));
+	}
+
+	public boolean exists(String conversationId) {
+		return conversationRepository.existsById(conversationId);
+	}
+
+	@Transactional
+	public void deleteMessagesAndConversation(String conversationId) {
+		messageRepository.deleteByConversationId(conversationId);
+		conversationRepository.deleteById(conversationId);
 	}
 
 	public ConversationMessageEntity appendMessage(String conversationId, ConversationMessageRole role, String content) {

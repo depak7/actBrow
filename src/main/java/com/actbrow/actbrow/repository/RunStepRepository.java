@@ -9,4 +9,6 @@ import com.actbrow.actbrow.model.RunStepEntity;
 public interface RunStepRepository extends JpaRepository<RunStepEntity, String> {
 
 	List<RunStepEntity> findAllByRunIdOrderByStepIndexAsc(String runId);
+
+	void deleteByRunId(String runId);
 }
