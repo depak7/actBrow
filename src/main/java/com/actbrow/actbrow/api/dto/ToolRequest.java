@@ -8,7 +8,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
 public record ToolRequest(
-	@NotBlank String key,
+	String key,
 	@NotBlank String displayName,
 	@NotBlank String description,
 	@NotNull Map<String, Object> inputSchema,

@@ -76,6 +76,7 @@ class ApiFlowTests {
 		registry.add("actbrow.gemini.base-url", () -> GEMINI_SERVER.url("/v1beta").toString().replaceAll("/$", ""));
 		registry.add("actbrow.gemini.default-model", () -> "gemini-2.0-flash");
 		registry.add("actbrow.gemini.request-timeout", () -> "5s");
+		registry.add("actbrow.llm.default-provider", () -> "gemini");
 	}
 
 	@AfterAll
@@ -390,6 +391,59 @@ class ApiFlowTests {
 		assertThat(assistantTools).isNotNull();
 		assertThat(assistantTools).extracting(ToolResponse::id).contains(tool.id());
 		assertThat(assistantTools).extracting(ToolResponse::key).contains("orders.open_page");
+	}
+
+	@Test
+	void createsAndAttachesToolWithoutKeyGeneratesStableId() {
+		WebTestClient webTestClient = webTestClient();
+
+		AssistantResponse assistant = webTestClient.post()
+			.uri("/v1/assistants")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"key":"support-autokey","name":"Support Autokey","systemPrompt":"Handle support","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(AssistantResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		ToolResponse tool = webTestClient.post()
+			.uri("/v1/tools/attach")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{
+				  "assistantId":"%s",
+				  "displayName":"Orphan Nav",
+				  "description":"No client key supplied.",
+				  "inputSchema":{"type":"object","properties":{}},
+				  "type":"CLIENT",
+				  "version":"1",
+				  "enabled":true,
+				  "executorRef":"app.navigate",
+				  "defaultArguments":{"path":"/orphan"}
+				}
+				""".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isCreated()
+			.expectBody(ToolResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		assertThat(tool).isNotNull();
+		assertThat(tool.key()).startsWith("tool_");
+		assertThat(tool.key()).hasSize("tool_".length() + 32);
+
+		List<ToolResponse> assistantTools = webTestClient.get()
+			.uri("/v1/assistants/%s/tools".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBodyList(ToolResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		assertThat(assistantTools).extracting(ToolResponse::id).contains(tool.id());
 	}
 
 	private static MockResponse jsonResponse(String body) {

@@ -33,6 +33,7 @@ public class AssistantService {
 		entity.setTenantId(request.tenantId());
 		AssistantDefinitionEntity saved = assistantRepository.save(entity);
 		toolService.attachBuiltInClientTools(saved.getId());
+		toolService.attachHttpTools(saved.getId());
 		return toResponse(saved);
 	}
 

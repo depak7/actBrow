@@ -4,6 +4,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +14,7 @@ import com.actbrow.actbrow.api.dto.ToolRequest;
 import com.actbrow.actbrow.api.dto.ToolResponse;
 import com.actbrow.actbrow.model.AssistantToolBindingEntity;
 import com.actbrow.actbrow.model.ToolDefinitionEntity;
+import com.actbrow.actbrow.model.ToolType;
 import com.actbrow.actbrow.repository.AssistantToolBindingRepository;
 import com.actbrow.actbrow.repository.ToolRepository;
 
@@ -31,62 +33,69 @@ public class ToolService {
 	}
 
 	public ToolResponse create(ToolRequest request) {
-		toolRepository.findByKey(request.key()).ifPresent(existing -> {
+		if (request.type() == ToolType.BUILD_IN) {
+			throw new IllegalArgumentException("BUILD_IN tools are platform-managed");
+		}
+		String key = resolveToolKey(request.key());
+		toolRepository.findByKey(key).ifPresent(existing -> {
 			throw new IllegalArgumentException("Tool key already exists");
 		});
-		return saveNewEntity(new ToolDefinitionEntity(), request);
+		return saveNewEntity(new ToolDefinitionEntity(), request, key);
 	}
 
 	public ToolResponse upsertByKey(ToolRequest request) {
-		return toolRepository.findByKey(request.key())
-			.map(existing -> saveNewEntity(existing, request))
-			.orElseGet(() -> saveNewEntity(new ToolDefinitionEntity(), request));
+		if (request.key() == null || request.key().isBlank()) {
+			throw new IllegalArgumentException("Tool key is required for upsert");
+		}
+		String key = request.key().trim();
+		return toolRepository.findByKey(key)
+			.map(existing -> saveNewEntity(existing, request, key))
+			.orElseGet(() -> saveNewEntity(new ToolDefinitionEntity(), request, key));
 	}
 
 	public void attachBuiltInClientTools(String assistantId) {
 		for (ToolResponse tool : list()) {
-			if (tool.type().name().equals("CLIENT")
-				&& tool.executorRef() != null
-				&& tool.key().equals(tool.executorRef())) {
-				bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
-					existing -> {
-					},
-					() -> {
-						AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
-						entity.setAssistantId(assistantId);
-						entity.setToolId(tool.id());
-						bindingRepository.save(entity);
-					});
+			if (!ToolCatalogPolicies.isBuiltInClientAttachmentCandidate(tool)) {
+				continue;
 			}
+			bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
+				existing -> {
+				},
+				() -> {
+					AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
+					entity.setAssistantId(assistantId);
+					entity.setToolId(tool.id());
+					bindingRepository.save(entity);
+				});
 		}
 	}
 
 	public void attachHttpTools(String assistantId) {
 		for (ToolResponse tool : list()) {
-			if (tool.type().name().equals("SERVER_HTTP")
-				&& tool.executorRef() != null
-				&& tool.key().equals(tool.executorRef())) {
-				bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
-					existing -> {
-					},
-					() -> {
-						AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
-						entity.setAssistantId(assistantId);
-						entity.setToolId(tool.id());
-						bindingRepository.save(entity);
-					});
+			if (!ToolCatalogPolicies.isHttpBuiltInAttachmentCandidate(tool)) {
+				continue;
 			}
+			bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
+				existing -> {
+				},
+				() -> {
+					AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
+					entity.setAssistantId(assistantId);
+					entity.setToolId(tool.id());
+					bindingRepository.save(entity);
+				});
 		}
 	}
 
 	public ToolResponse update(String id, ToolRequest request) {
 		ToolDefinitionEntity entity = requireEntity(id);
-		if (!entity.getKey().equals(request.key())) {
-			toolRepository.findByKey(request.key()).ifPresent(existing -> {
+		String newKey = request.key() == null || request.key().isBlank() ? entity.getKey() : request.key().trim();
+		if (!entity.getKey().equals(newKey)) {
+			toolRepository.findByKey(newKey).ifPresent(existing -> {
 				throw new IllegalArgumentException("Tool key already exists");
 			});
 		}
-		return saveNewEntity(entity, request);
+		return saveNewEntity(entity, request, newKey);
 	}
 
 	@Transactional
@@ -96,7 +105,21 @@ public class ToolService {
 		toolRepository.deleteById(toolId);
 	}
 
-	private ToolResponse saveNewEntity(ToolDefinitionEntity entity, ToolRequest request) {
+	private String resolveToolKey(String requested) {
+		if (requested != null && !requested.isBlank()) {
+			return requested.trim();
+		}
+		String candidate;
+		for (int attempt = 0; attempt < 32; attempt++) {
+			candidate = "tool_" + UUID.randomUUID().toString().replace("-", "");
+			if (toolRepository.findByKey(candidate).isEmpty()) {
+				return candidate;
+			}
+		}
+		throw new IllegalStateException("Could not allocate a unique tool key");
+	}
+
+	private ToolResponse saveNewEntity(ToolDefinitionEntity entity, ToolRequest request, String keyForEntity) {
 		String inputSchema = jsonSchemaValidator.normalizeObject(request.inputSchema(), "inputSchema");
 		String outputSchema = request.outputSchema() == null ? null
 			: jsonSchemaValidator.normalizeObject(request.outputSchema(), "outputSchema");
@@ -104,7 +127,7 @@ public class ToolService {
 			: jsonSchemaValidator.normalizeObject(request.defaultArguments(), "defaultArguments");
 		String metadata = request.metadata() == null ? null
 			: jsonSchemaValidator.normalizeObject(request.metadata(), "metadata");
-		entity.setKey(request.key());
+		entity.setKey(keyForEntity);
 		entity.setDisplayName(request.displayName());
 		entity.setDescription(request.description());
 		entity.setInputSchema(inputSchema);
@@ -123,7 +146,10 @@ public class ToolService {
 	}
 
 	public List<ToolResponse> listAssistantTools(String assistantId) {
-		return loadAssistantTools(assistantId).stream().map(this::toResponse).toList();
+		return loadAssistantTools(assistantId).stream()
+			.filter(entity -> !ToolCatalogPolicies.isHiddenFromAssistantManagementList(entity))
+			.map(this::toResponse)
+			.toList();
 	}
 
 	public void attachTool(String assistantId, String toolId) {

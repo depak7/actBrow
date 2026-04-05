@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 	GeminiProperties.class,
 	GoogleOAuthProperties.class,
 	GroqProperties.class,
+	OpenRouterProperties.class,
 	LlmProperties.class,
 	CorsProperties.class
 })

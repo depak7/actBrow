@@ -40,7 +40,7 @@ public class ConversationController {
 
 	@PostMapping("/{conversationId}/turns")
 	public RunResponse createTurn(@PathVariable String conversationId, @Valid @RequestBody TurnRequest request) {
-		return runService.startRun(conversationId, request.content());
+		return runService.startRun(conversationId, request);
 	}
 
 	@GetMapping("/{conversationId}/messages")

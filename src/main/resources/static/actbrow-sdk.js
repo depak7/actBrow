@@ -45,6 +45,105 @@
     return element;
   }
 
+  function isProbablyVisible(el) {
+    if (!el || typeof el.getBoundingClientRect !== "function") {
+      return true;
+    }
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      return false;
+    }
+    try {
+      var st = window.getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) {
+        return false;
+      }
+    } catch (e) {
+      return true;
+    }
+    return true;
+  }
+
+  function escapeAttrValue(s) {
+    return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
+
+  function stableSelectorForElement(el) {
+    if (el.id) {
+      try {
+        if (typeof CSS !== "undefined" && CSS.escape) {
+          return "#" + CSS.escape(el.id);
+        }
+      } catch (e) {}
+      return "#" + String(el.id).replace(/(:|\.|\[|\]|\/|\s)/g, "\\$1");
+    }
+    var tag = el.tagName ? el.tagName.toLowerCase() : "*";
+    var name = el.getAttribute("name");
+    if (name && (tag === "input" || tag === "select" || tag === "textarea")) {
+      var t = el.getAttribute("type");
+      var base = tag + '[name="' + escapeAttrValue(name) + '"]';
+      if (tag === "input" && t && t !== "text" && t !== "search") {
+        return base + '[type="' + escapeAttrValue(t) + '"]';
+      }
+      return base;
+    }
+    var tid = el.getAttribute("data-testid");
+    if (tid) {
+      return '[data-testid="' + escapeAttrValue(tid) + '"]';
+    }
+    return tag;
+  }
+
+  /**
+   * Collects visible-ish interactive controls and suggested selectors for the LLM.
+   * @param options {{ maxElements?: number }}
+   */
+  function collectPageContext(options) {
+    if (typeof document === "undefined" || !document.querySelectorAll) {
+      return null;
+    }
+    var max = (options && options.maxElements) || 60;
+    var selectorList = [
+      'input:not([type="hidden"])',
+      "textarea",
+      "select",
+      "button",
+      'a[href]',
+      '[role="button"]',
+      '[role="searchbox"]',
+      '[role="textbox"]',
+      '[contenteditable="true"]'
+    ].join(", ");
+    var nodes = document.querySelectorAll(selectorList);
+    var elements = [];
+    var seen = [];
+    for (var i = 0; i < nodes.length && elements.length < max; i++) {
+      var el = nodes[i];
+      if (!el) continue;
+      if (seen.indexOf(el) >= 0) continue;
+      if (!isProbablyVisible(el)) continue;
+      seen.push(el);
+      var text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      elements.push({
+        selector: stableSelectorForElement(el),
+        tag: el.tagName,
+        type: el.getAttribute("type") || null,
+        name: el.getAttribute("name") || null,
+        id: el.id || null,
+        placeholder: el.getAttribute("placeholder") || null,
+        ariaLabel: el.getAttribute("aria-label") || null,
+        text: text || null
+      });
+    }
+    return {
+      url: typeof location !== "undefined" ? location.href : "",
+      path: typeof location !== "undefined" ? location.pathname : "",
+      title: document.title || "",
+      collectedAt: new Date().toISOString(),
+      elements: elements
+    };
+  }
+
   function builtInTools(config) {
     return {
       "dom.query": function (args) {
@@ -323,6 +422,32 @@
         currentConversationId = null;
       },
       sendMessage: function (message) {
+        var content;
+        var pageContextPayload = undefined;
+        var maxEl = (config && config.pageContextMaxElements) || 60;
+        if (typeof message === "string") {
+          content = message;
+          if (config && config.includePageContext === false) {
+            pageContextPayload = null;
+          } else {
+            pageContextPayload = collectPageContext({ maxElements: maxEl });
+          }
+        } else if (message && typeof message === "object") {
+          content = message.content;
+          if (message.includePageContext === false) {
+            pageContextPayload = null;
+          } else if (message.pageContext != null) {
+            pageContextPayload = message.pageContext;
+          } else {
+            pageContextPayload = collectPageContext({ maxElements: maxEl });
+          }
+        } else {
+          throw new Error("sendMessage expects a string or { content: string, ... }");
+        }
+        var body = { content: content };
+        if (pageContextPayload != null) {
+          body.pageContext = pageContextPayload;
+        }
         var ensureConversation = currentConversationId
           ? Promise.resolve({ id: currentConversationId })
           : this.startConversation();
@@ -330,12 +455,16 @@
           return request("/v1/conversations/" + conversation.id + "/turns", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: message.content })
+            body: JSON.stringify(body)
           }).then(function (run) {
             streamRun(run.id);
             return run;
           });
         });
+      },
+      collectPageContext: function (opts) {
+        var maxEl = (opts && opts.maxElements) || (config && config.pageContextMaxElements) || 60;
+        return collectPageContext({ maxElements: maxEl });
       },
       ensureConversation: function () {
         return currentConversationId

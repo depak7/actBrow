@@ -20,14 +20,14 @@ public class BuiltinToolCatalog {
 					"properties", Map.of(
 						"path", Map.of("type", "string"),
 						"url", Map.of("type", "string"))),
-				null, ToolType.CLIENT, "1", true, "app.navigate", Map.of(), Map.of()),
+				null, ToolType.BUILD_IN, "1", true, "app.navigate", Map.of(), Map.of()),
 			new ToolRequest("dom.click", "DOM Click",
 				"Click an element in the current page using a CSS selector.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of("selector", Map.of("type", "string")),
 					"required", List.of("selector")),
-				null, ToolType.CLIENT, "1", true, "dom.click", Map.of(), Map.of()),
+				null, ToolType.BUILD_IN, "1", true, "dom.click", Map.of(), Map.of()),
 			new ToolRequest("dom.type", "DOM Type",
 				"Type text into an element using a CSS selector and value.",
 				Map.of(
@@ -36,27 +36,27 @@ public class BuiltinToolCatalog {
 						"selector", Map.of("type", "string"),
 						"value", Map.of("type", "string")),
 					"required", List.of("selector", "value")),
-				null, ToolType.CLIENT, "1", true, "dom.type", Map.of(), Map.of()),
+				null, ToolType.BUILD_IN, "1", true, "dom.type", Map.of(), Map.of()),
 			new ToolRequest("dom.read", "DOM Read",
 				"Read text or value from an element using a CSS selector.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of("selector", Map.of("type", "string")),
 					"required", List.of("selector")),
-				null, ToolType.CLIENT, "1", true, "dom.read", Map.of(), Map.of()),
+				null, ToolType.BUILD_IN, "1", true, "dom.read", Map.of(), Map.of()),
 			new ToolRequest("dom.query", "DOM Query",
 				"Find matching elements using a CSS selector.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of("selector", Map.of("type", "string")),
 					"required", List.of("selector")),
-				null, ToolType.CLIENT, "1", true, "dom.query", Map.of(), Map.of()),
+				null, ToolType.BUILD_IN, "1", true, "dom.query", Map.of(), Map.of()),
 			new ToolRequest("page.screenshot", "Page Screenshot",
 				"Capture a page snapshot for observation.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of()),
-				null, ToolType.CLIENT, "1", true, "page.screenshot", Map.of(), Map.of()));
+				null, ToolType.BUILD_IN, "1", true, "page.screenshot", Map.of(), Map.of()));
 	}
 
 	public List<ToolRequest> builtInHttpTools() {
@@ -68,7 +68,7 @@ public class BuiltinToolCatalog {
 					"properties", Map.of(
 						"url", Map.of("type", "string", "description", "Full URL or path"),
 						"params", Map.of("type", "object", "description", "Query parameters"))),
-				null, ToolType.SERVER_HTTP, "1", true, "api.get", Map.of(
+				null, ToolType.BUILD_IN, "1", true, "api.get", Map.of(
 					"method", "GET"), Map.of()),
 			new ToolRequest("api.post", "HTTP POST Request",
 				"Make a POST request to an external API endpoint.",
@@ -77,7 +77,7 @@ public class BuiltinToolCatalog {
 					"properties", Map.of(
 						"url", Map.of("type", "string", "description", "Full URL or path"),
 						"body", Map.of("type", "object", "description", "Request body"))),
-				null, ToolType.SERVER_HTTP, "1", true, "api.post", Map.of(
+				null, ToolType.BUILD_IN, "1", true, "api.post", Map.of(
 					"method", "POST",
 					"headers", Map.of("Content-Type", "application/json")), Map.of()),
 			new ToolRequest("api.put", "HTTP PUT Request",
@@ -87,7 +87,7 @@ public class BuiltinToolCatalog {
 					"properties", Map.of(
 						"url", Map.of("type", "string", "description", "Full URL or path"),
 						"body", Map.of("type", "object", "description", "Request body"))),
-				null, ToolType.SERVER_HTTP, "1", true, "api.put", Map.of(
+				null, ToolType.BUILD_IN, "1", true, "api.put", Map.of(
 					"method", "PUT",
 					"headers", Map.of("Content-Type", "application/json")), Map.of()),
 			new ToolRequest("api.delete", "HTTP DELETE Request",
@@ -96,7 +96,7 @@ public class BuiltinToolCatalog {
 					"type", "object",
 					"properties", Map.of(
 						"url", Map.of("type", "string", "description", "Full URL or path"))),
-				null, ToolType.SERVER_HTTP, "1", true, "api.delete", Map.of(
+				null, ToolType.BUILD_IN, "1", true, "api.delete", Map.of(
 					"method", "DELETE"), Map.of()));
 	}
 }

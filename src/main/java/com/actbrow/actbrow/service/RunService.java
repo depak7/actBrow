@@ -17,6 +17,10 @@ import com.actbrow.actbrow.agent.ToolCallDecision;
 import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.agent.ToolExecutionResult;
 import com.actbrow.actbrow.api.dto.RunResponse;
+import com.actbrow.actbrow.api.dto.TurnRequest;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.actbrow.actbrow.config.ActbrowProperties;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.model.ConversationEntity;
@@ -44,13 +48,14 @@ public class RunService {
 	private final HttpServerToolExecutor httpServerToolExecutor;
 	private final NavigationFlowService navigationFlowService;
 	private final ActbrowProperties properties;
+	private final ObjectMapper objectMapper;
 	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
 		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
 		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
-		NavigationFlowService navigationFlowService, ActbrowProperties properties) {
+		NavigationFlowService navigationFlowService, ActbrowProperties properties, ObjectMapper objectMapper) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
 		this.conversationService = conversationService;
@@ -63,9 +68,11 @@ public class RunService {
 		this.httpServerToolExecutor = httpServerToolExecutor;
 		this.navigationFlowService = navigationFlowService;
 		this.properties = properties;
+		this.objectMapper = objectMapper;
 	}
 
-	public RunResponse startRun(String conversationId, String userContent) {
+	public RunResponse startRun(String conversationId, TurnRequest request) {
+		String userContent = composeUserTurnContent(request.content(), request.pageContext());
 		ConversationEntity conversation = conversationService.requireConversation(conversationId);
 		AssistantDefinitionEntity assistant = assistantService.requireEntity(conversation.getAssistantId());
 		conversationService.appendMessage(conversationId, ConversationMessageRole.USER, userContent);
@@ -120,7 +127,7 @@ public class RunService {
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
 
-				ModelDecision decision = modelProvider.decideNextStep(assistant.getModel(), systemPrompt,
+				ModelDecision decision = modelProvider.decideNextStep(null, systemPrompt,
 					conversationService.listMessages(run.getConversationId()), tools, stepIndex);
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 
@@ -148,7 +155,7 @@ public class RunService {
 					"toolId", tool.id(),
 					"toolKey", tool.key(),
 					"executorKey", executorKey,
-					"type", tool.type().name(),
+					"type", wireToolTypeForClients(tool),
 					"arguments", executionArguments));
 				recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCallDecision.toolCall().toString());
 
@@ -176,7 +183,7 @@ public class RunService {
 	private ToolExecutionResult executeTool(RunEntity run, ToolCallDecision toolCallDecision, ToolDescriptor tool,
 		Map<String, Object> executionArguments)
 		throws Exception {
-		if (tool.type() == ToolType.CLIENT) {
+		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
 			runRepository.save(run);
 			ToolExecutionResult result = pendingClientToolStore.register(toolCallDecision.toolCall().toolCallId())
@@ -185,10 +192,20 @@ public class RunService {
 			runRepository.save(run);
 			return result;
 		}
-		if (tool.type() == ToolType.SERVER_HTTP) {
+		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
 			return httpServerToolExecutor.execute(tool, executionArguments);
 		}
 		return builtinServerToolExecutor.execute(tool, executionArguments);
+	}
+
+	private static String wireToolTypeForClients(ToolDescriptor tool) {
+		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
+			return ToolType.CLIENT.name();
+		}
+		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
+			return ToolType.SERVER_HTTP.name();
+		}
+		return tool.type().name();
 	}
 
 	private String resolveExecutorKey(ToolDescriptor tool) {
@@ -214,7 +231,7 @@ public class RunService {
 	}
 
 	private static boolean isDedicatedClientNavigateTool(ToolDescriptor tool) {
-		if (tool.type() != ToolType.CLIENT) {
+		if (!ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			return false;
 		}
 		if (!"app.navigate".equals(tool.executorRef())) {
@@ -251,12 +268,36 @@ public class RunService {
 			run.getStepCount(), run.getLastError(), run.getCreatedAt(), run.getCompletedAt());
 	}
 
+	private String composeUserTurnContent(String content, JsonNode pageContext) {
+		if (pageContext == null || pageContext.isNull()) {
+			return content;
+		}
+		if (pageContext.isObject() && pageContext.size() == 0) {
+			return content;
+		}
+		try {
+			String json = objectMapper.writeValueAsString(pageContext);
+			if (json.length() > 48_000) {
+				json = json.substring(0, 48_000) + "\n...(PAGE_CONTEXT truncated)";
+			}
+			return content.stripTrailing() + "\n\n--- PAGE_CONTEXT (browser snapshot when the user sent this message. "
+				+ "Prefer the listed \"selector\" values for dom.click, dom.type, dom.read. "
+				+ "If you need a control not listed, call dom.query (or page.screenshot) first—do not invent selectors.) ---\n"
+				+ json;
+		}
+		catch (JsonProcessingException exception) {
+			return content;
+		}
+	}
+
 	private String buildSystemPrompt(AssistantDefinitionEntity assistant, String conversationId) {
 		StringBuilder prompt = new StringBuilder();
 		
 		if (assistant.getSystemPrompt() != null && !assistant.getSystemPrompt().isBlank()) {
 			prompt.append(assistant.getSystemPrompt()).append("\n\n");
 		}
+
+		prompt.append("BROWSER AUTOMATION: You do not see the live page. User messages may include a PAGE_CONTEXT JSON block from the host app listing interactive elements and suggested CSS selectors. Treat that block as authoritative for that turn unless tool results show the DOM changed. Do not guess selectors; use PAGE_CONTEXT or call dom.query / page.screenshot first, then act with dom.click, dom.type, or app.navigate.\n\n");
 
 		if (assistant.isUsePredefinedFlows()) {
 			try {
