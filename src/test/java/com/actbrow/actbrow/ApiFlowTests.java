@@ -7,7 +7,9 @@ import java.time.Duration;
 import java.util.List;
 
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.MediaType;
@@ -17,6 +19,7 @@ import org.springframework.test.web.reactive.server.FluxExchangeResult;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import com.actbrow.actbrow.api.dto.AssistantResponse;
+import com.actbrow.actbrow.api.dto.TenantResponse;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
 import com.actbrow.actbrow.api.dto.RunEventResponse;
 import com.actbrow.actbrow.api.dto.RunResponse;
@@ -27,12 +30,40 @@ import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ApiFlowTests {
 
 	private static final MockWebServer GEMINI_SERVER = startServer();
 
 	@LocalServerPort
 	private int port;
+
+	private String tenantApiKey;
+	private String tenantId;
+
+	@BeforeAll
+	void provisionTenant() {
+		WebTestClient anon = WebTestClient.bindToServer()
+			.baseUrl("http://localhost:" + port)
+			.responseTimeout(Duration.ofSeconds(10))
+			.build();
+		TenantResponse tenant = anon.post()
+			.uri("/v1/tenants")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"key":"api-flow-suite","name":"Api Flow Suite","enabled":true}
+				""")
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(TenantResponse.class)
+			.returnResult()
+			.getResponseBody();
+		if (tenant == null || tenant.apiKey() == null || tenant.apiKey().isBlank()) {
+			throw new IllegalStateException("Failed to provision test tenant");
+		}
+		this.tenantApiKey = tenant.apiKey();
+		this.tenantId = tenant.id();
+	}
 
 	@DynamicPropertySource
 	static void properties(DynamicPropertyRegistry registry) {
@@ -66,6 +97,7 @@ class ApiFlowTests {
 	private WebTestClient webTestClient() {
 		return WebTestClient.bindToServer()
 			.baseUrl("http://localhost:" + port)
+			.defaultHeader("X-API-Key", tenantApiKey)
 			.responseTimeout(Duration.ofSeconds(10))
 			.build();
 	}
@@ -105,8 +137,8 @@ class ApiFlowTests {
 			.uri("/v1/assistants")
 			.contentType(MediaType.APPLICATION_JSON)
 			.bodyValue("""
-				{"key":"support","name":"Support","systemPrompt":"Handle support","model":"gemini-2.0-flash"}
-				""")
+				{"key":"support","name":"Support","systemPrompt":"Handle support","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
 			.exchange()
 			.expectStatus().isOk()
 			.expectBody(AssistantResponse.class)
@@ -218,8 +250,8 @@ class ApiFlowTests {
 			.uri("/v1/assistants")
 			.contentType(MediaType.APPLICATION_JSON)
 			.bodyValue("""
-				{"key":"support-alias","name":"Support Alias","systemPrompt":"Handle support","model":"gemini-2.0-flash"}
-				""")
+				{"key":"support-alias","name":"Support Alias","systemPrompt":"Handle support","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
 			.exchange()
 			.expectStatus().isOk()
 			.expectBody(AssistantResponse.class)
@@ -315,8 +347,8 @@ class ApiFlowTests {
 			.uri("/v1/assistants")
 			.contentType(MediaType.APPLICATION_JSON)
 			.bodyValue("""
-				{"key":"support-combined","name":"Support Combined","systemPrompt":"Handle support","model":"gemini-2.0-flash"}
-				""")
+				{"key":"support-combined","name":"Support Combined","systemPrompt":"Handle support","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
 			.exchange()
 			.expectStatus().isOk()
 			.expectBody(AssistantResponse.class)

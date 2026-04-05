@@ -9,7 +9,7 @@ import jakarta.validation.constraints.NotNull;
 
 public record CreateAssistantToolRequest(
 	@NotBlank String assistantId,
-	@NotBlank String key,
+	String key,
 	@NotBlank String displayName,
 	@NotBlank String description,
 	@NotNull Map<String, Object> inputSchema,

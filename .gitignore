@@ -31,3 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Docker (local only) ###
+docker-compose.yml
+docker-compose.override.yml

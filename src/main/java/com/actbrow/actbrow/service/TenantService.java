@@ -30,6 +30,8 @@ public class TenantService {
 		entity.setName(request.name());
 		entity.setApiKey(generateApiKey(request.apiKey()));
 		entity.setEnabled(request.enabled());
+		String ownerId = request.userId();
+		entity.setUserId(ownerId != null && !ownerId.isBlank() ? ownerId : "bootstrap");
 		return toResponse(tenantRepository.save(entity));
 	}
 
@@ -48,6 +50,9 @@ public class TenantService {
 			entity.setApiKey(generateApiKey(request.apiKey()));
 		}
 		entity.setEnabled(request.enabled());
+		if (request.userId() != null && !request.userId().isBlank()) {
+			entity.setUserId(request.userId());
+		}
 		return toResponse(tenantRepository.save(entity));
 	}
 

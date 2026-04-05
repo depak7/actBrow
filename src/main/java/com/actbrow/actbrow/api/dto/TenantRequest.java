@@ -6,6 +6,7 @@ public record TenantRequest(
 	@NotBlank String key,
 	@NotBlank String name,
 	String apiKey,
-	boolean enabled
+	boolean enabled,
+	String userId
 ) {
 }
