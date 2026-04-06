@@ -21,6 +21,7 @@ import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.actbrow.actbrow.conversation.UserMessageDisplay;
 import com.actbrow.actbrow.config.ActbrowProperties;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.model.ConversationEntity;
@@ -296,7 +297,7 @@ public class RunService {
 			if (json.length() > 48_000) {
 				json = json.substring(0, 48_000) + "\n...(PAGE_CONTEXT truncated)";
 			}
-			return content.stripTrailing() + "\n\n--- PAGE_CONTEXT (browser snapshot when the user sent this message. "
+			return content.stripTrailing() + UserMessageDisplay.PAGE_CONTEXT_APPENDIX_START
 				+ "Prefer the listed \"selector\" values for dom.click, dom.type, dom.read. "
 				+ "If you need a control not listed, call dom.query (or page.screenshot) first—do not invent selectors.) ---\n"
 				+ json;

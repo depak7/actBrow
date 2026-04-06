@@ -18,6 +18,8 @@ import com.actbrow.actbrow.api.dto.ConversationRequest;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
 import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
+import com.actbrow.actbrow.conversation.UserMessageDisplay;
+import com.actbrow.actbrow.model.ConversationMessageRole;
 import com.actbrow.actbrow.service.ConversationService;
 import com.actbrow.actbrow.service.RunService;
 
@@ -50,11 +52,13 @@ public class ConversationController {
 	public List<ConversationMessageResponse> listMessages(@PathVariable String conversationId) {
 		conversationService.requireConversation(conversationId);
 		return conversationService.listMessages(conversationId).stream()
-			.map(m -> new ConversationMessageResponse(
-				m.getId(),
-				m.getRole().name(),
-				m.getContent(),
-				m.getCreatedAt()))
+			.map(m -> {
+				String content = m.getContent();
+				if (m.getRole() == ConversationMessageRole.USER) {
+					content = UserMessageDisplay.stripStoredAppendix(content);
+				}
+				return new ConversationMessageResponse(m.getId(), m.getRole().name(), content, m.getCreatedAt());
+			})
 			.toList();
 	}
 
