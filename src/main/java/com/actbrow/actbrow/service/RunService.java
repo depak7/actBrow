@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.transaction.annotation.Transactional;
@@ -51,6 +52,7 @@ public class RunService {
 	private final ActbrowProperties properties;
 	private final ObjectMapper objectMapper;
 	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
+	private final Set<String> cancelledRuns = ConcurrentHashMap.newKeySet();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
@@ -98,6 +100,16 @@ public class RunService {
 		Thread.startVirtualThread(() -> processRun(runId));
 	}
 
+	public RunResponse cancelRun(String runId) {
+		RunEntity run = requireRun(runId);
+		RunStatus status = run.getStatus();
+		if (status == RunStatus.COMPLETED || status == RunStatus.FAILED || status == RunStatus.CANCELLED) {
+			return toResponse(run);
+		}
+		cancelledRuns.add(runId);
+		return toResponse(run);
+	}
+
 	public RunEntity requireRun(String runId) {
 		return runRepository.findById(runId).orElseThrow(() -> new IllegalArgumentException("Run not found"));
 	}
@@ -118,6 +130,7 @@ public class RunService {
 		for (RunEntity run : runs) {
 			String runId = run.getId();
 			startedRuns.remove(runId);
+			cancelledRuns.remove(runId);
 			eventBroker.dispose(runId);
 			runStepRepository.deleteByRunId(runId);
 		}
@@ -132,6 +145,12 @@ public class RunService {
 
 	private void processRun(String runId) {
 		RunEntity run = requireRun(runId);
+
+		if (cancelledRuns.contains(runId)) {
+			cancelRunInternal(run);
+			return;
+		}
+
 		eventBroker.emit(runId, "run.started", Map.of(
 			"assistantId", run.getAssistantId(),
 			"conversationId", run.getConversationId()));
@@ -144,6 +163,11 @@ public class RunService {
 			String systemPrompt = buildSystemPrompt(assistant, run.getConversationId());
 
 			for (int stepIndex = 0; stepIndex < properties.maxSteps(); stepIndex++) {
+				if (cancelledRuns.contains(runId)) {
+					cancelRunInternal(run);
+					return;
+				}
+
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
 
@@ -198,6 +222,18 @@ public class RunService {
 		catch (Exception exception) {
 			failRun(run, exception.getMessage());
 		}
+		finally {
+			startedRuns.remove(runId);
+			cancelledRuns.remove(runId);
+		}
+	}
+
+	private void cancelRunInternal(RunEntity run) {
+		run.setStatus(RunStatus.CANCELLED);
+		run.setCompletedAt(Instant.now());
+		runRepository.save(run);
+		eventBroker.emit(run.getId(), "run.cancelled", Map.of());
+		eventBroker.complete(run.getId());
 	}
 
 	private ToolExecutionResult executeTool(RunEntity run, ToolCallDecision toolCallDecision, ToolDescriptor tool,
@@ -206,11 +242,17 @@ public class RunService {
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
 			runRepository.save(run);
-			ToolExecutionResult result = pendingClientToolStore.register(toolCallDecision.toolCall().toolCallId())
-				.get(properties.toolTimeout().toMillis(), TimeUnit.MILLISECONDS);
-			run.setStatus(RunStatus.IN_PROGRESS);
-			runRepository.save(run);
-			return result;
+			try {
+				ToolExecutionResult result = pendingClientToolStore.register(toolCallDecision.toolCall().toolCallId())
+					.get(properties.toolTimeout().toMillis(), TimeUnit.MILLISECONDS);
+				run.setStatus(RunStatus.IN_PROGRESS);
+				runRepository.save(run);
+				return result;
+			}
+			catch (TimeoutException e) {
+				pendingClientToolStore.cancel(toolCallDecision.toolCall().toolCallId());
+				throw e;
+			}
 		}
 		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
 			return httpServerToolExecutor.execute(tool, executionArguments);
@@ -309,7 +351,7 @@ public class RunService {
 
 	private String buildSystemPrompt(AssistantDefinitionEntity assistant, String conversationId) {
 		StringBuilder prompt = new StringBuilder();
-		
+
 		if (assistant.getSystemPrompt() != null && !assistant.getSystemPrompt().isBlank()) {
 			prompt.append(assistant.getSystemPrompt()).append("\n\n");
 		}
@@ -322,7 +364,7 @@ public class RunService {
 				if (!flows.isEmpty()) {
 					prompt.append("NAVIGATION FLOWS AVAILABLE:\n");
 					prompt.append("When the user request matches a flow's trigger phrase, follow the defined steps in order.\n\n");
-					
+
 					for (var flow : flows) {
 						prompt.append("Flow: ").append(flow.name()).append("\n");
 						prompt.append("Trigger: ").append(flow.triggerPhrase()).append("\n");
@@ -338,7 +380,7 @@ public class RunService {
 						}
 						prompt.append("\n");
 					}
-					
+
 					prompt.append("INSTRUCTION: When user request matches a flow trigger, execute each step sequentially using the appropriate tools (app.navigate, dom.click, dom.type, etc.). Do not skip steps.\n\n");
 				}
 			}

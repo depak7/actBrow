@@ -45,6 +45,11 @@ public class RunController {
 		return runEventBroker.stream(runId);
 	}
 
+	@PostMapping("/{runId}/cancel")
+	public RunResponse cancelRun(@PathVariable String runId) {
+		return runService.cancelRun(runId);
+	}
+
 	@PostMapping("/{runId}/tool-results")
 	public RunResponse submitToolResult(@PathVariable String runId, @Valid @RequestBody ToolResultRequest request) {
 		ToolExecutionResult result = new ToolExecutionResult(request.success(), request.structuredOutput(),
