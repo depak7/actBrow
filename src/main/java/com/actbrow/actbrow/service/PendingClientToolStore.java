@@ -26,4 +26,15 @@ public class PendingClientToolStore {
 		}
 		future.complete(result);
 	}
+
+	/**
+	 * Cancels a pending future. Called when a TimeoutException fires in RunService so the
+	 * future does not linger in the map after the run has already failed or been cancelled.
+	 */
+	public void cancel(String toolCallId) {
+		CompletableFuture<ToolExecutionResult> future = pendingResults.remove(toolCallId);
+		if (future != null) {
+			future.cancel(true);
+		}
+	}
 }

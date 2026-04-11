@@ -60,8 +60,14 @@ public class ApiKeyAuthFilter implements WebFilter {
 			if (!tenant.isEnabled()) {
 				return unauthorized(exchange, "Tenant is disabled");
 			}
+			// Strip any caller-supplied tenant headers before adding the resolved values
+			// to prevent tenant identity spoofing.
 			ServerWebExchange authenticatedExchange = exchange.mutate()
 				.request(exchange.getRequest().mutate()
+					.headers(h -> {
+						h.remove("X-Tenant-Id");
+						h.remove("X-Tenant-Key");
+					})
 					.header("X-Tenant-Id", tenant.getId())
 					.header("X-Tenant-Key", tenant.getKey())
 					.build())
@@ -90,9 +96,6 @@ public class ApiKeyAuthFilter implements WebFilter {
 			return true;
 		}
 		if ("/actbrow-sdk.js".equals(path) || "/actbrow-widget.js".equals(path)) {
-			return true;
-		}
-		if (segmentsMatch(path, "/h2-console")) {
 			return true;
 		}
 		return segmentsMatch(path, "/auth");
