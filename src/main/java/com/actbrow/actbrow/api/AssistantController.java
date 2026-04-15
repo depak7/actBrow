@@ -27,6 +27,11 @@ public class AssistantController {
 		return assistantService.createOrUpdate(request);
 	}
 
+	@PutMapping("/{id}")
+	public AssistantResponse update(@PathVariable String id, @Valid @RequestBody CreateAssistantRequest request) {
+		return assistantService.update(id, request);
+	}
+
 	@GetMapping
 	public List<AssistantResponse> list(@RequestParam(required = false) String tenantId) {
 		if (tenantId != null && !tenantId.isBlank()) {

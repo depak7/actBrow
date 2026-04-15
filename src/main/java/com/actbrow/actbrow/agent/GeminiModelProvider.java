@@ -138,13 +138,19 @@ public class GeminiModelProvider implements ModelProvider {
 		builder.append("Do not answer with plain text that mimics a tool call ");
 		builder.append("(e.g. app.navigate{...} or {\"type\":\"function\",\"name\":...}); use a real functionCall. ");
 		builder.append("When several navigation tools exist, prefer the one whose description matches the request. ");
-		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer.");
+		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer. ");
+		builder.append("Always prioritize the latest user turn over older tool failures or older requests. ");
+		builder.append("Do not mention a previous tool failure unless the latest user turn is clearly continuing that same task. ");
+		builder.append("If the latest user turn is short, ambiguous, or could refer to multiple destinations or actions, ask a clarifying question instead of claiming failure. ");
+		builder.append("When you ask a clarifying question, offer 2 to 4 concrete options and format them exactly like this: ");
+		builder.append("first the question in plain text, then a new line `OPTIONS: option one | option two`, and optionally a new line `RECOMMENDED: option one`. ");
+		builder.append("Do not use the OPTIONS format unless you are actually asking the user to choose.");
 		return builder.toString();
 	}
 
 	private List<Map<String, Object>> buildContents(List<ConversationMessageEntity> messages) {
 		List<Map<String, Object>> contents = new ArrayList<>();
-		for (ConversationMessageEntity message : messages) {
+		for (ConversationMessageEntity message : ModelConversationWindow.forModel(messages)) {
 			String role = message.getRole() == ConversationMessageRole.ASSISTANT ? "model" : "user";
 			String content = message.getRole() == ConversationMessageRole.TOOL
 				? "Tool result observed: " + message.getContent()

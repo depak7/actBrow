@@ -51,10 +51,15 @@ public class ConversationService {
 	}
 
 	public ConversationMessageEntity appendMessage(String conversationId, ConversationMessageRole role, String content) {
+		return appendMessage(conversationId, role, content, null);
+	}
+
+	public ConversationMessageEntity appendMessage(String conversationId, ConversationMessageRole role, String content, String toolCallId) {
 		ConversationMessageEntity entity = new ConversationMessageEntity();
 		entity.setConversationId(conversationId);
 		entity.setRole(role);
 		entity.setContent(content);
+		entity.setToolCallId(toolCallId);
 		return messageRepository.save(entity);
 	}
 

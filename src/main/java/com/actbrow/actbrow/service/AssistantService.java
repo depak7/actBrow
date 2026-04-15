@@ -52,6 +52,17 @@ public class AssistantService {
 			.toList();
 	}
 
+	public AssistantResponse update(String id, CreateAssistantRequest request) {
+		AssistantDefinitionEntity entity = requireEntity(id);
+		entity.setKey(request.key());
+		entity.setName(request.name());
+		entity.setSystemPrompt(request.systemPrompt());
+		entity.setModel(request.model());
+		entity.setUsePredefinedFlows(request.usePredefinedFlows());
+		AssistantDefinitionEntity saved = assistantRepository.save(entity);
+		return toResponse(saved);
+	}
+
 	private AssistantResponse toResponse(AssistantDefinitionEntity entity) {
 		return new AssistantResponse(entity.getId(), entity.getKey(), entity.getName(), entity.getSystemPrompt(),
 			entity.getModel(), entity.isUsePredefinedFlows(), entity.getTenantId(), entity.getCreatedAt());

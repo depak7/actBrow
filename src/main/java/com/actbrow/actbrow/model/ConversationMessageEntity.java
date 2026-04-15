@@ -28,6 +28,9 @@ public class ConversationMessageEntity {
 	@Column(nullable = false, columnDefinition = "TEXT")
 	private String content;
 
+	@Column
+	private String toolCallId;
+
 	@Column(nullable = false)
 	private Instant createdAt;
 
@@ -71,6 +74,14 @@ public class ConversationMessageEntity {
 
 	public void setContent(String content) {
 		this.content = content;
+	}
+
+	public String getToolCallId() {
+		return toolCallId;
+	}
+
+	public void setToolCallId(String toolCallId) {
+		this.toolCallId = toolCallId;
 	}
 
 	public Instant getCreatedAt() {

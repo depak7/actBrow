@@ -2,6 +2,7 @@ package com.actbrow.actbrow.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -18,6 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 
 class GeminiModelProviderTests {
 
@@ -78,6 +80,35 @@ class GeminiModelProviderTests {
 		ToolCallDecision toolDecision = assertInstanceOf(ToolCallDecision.class, decision);
 		assertEquals("account.lookup", toolDecision.toolCall().toolKey());
 		assertEquals("cust_999", toolDecision.toolCall().arguments().get("customerId"));
+	}
+
+	@Test
+	void excludesOldToolMessagesBeforeLatestUserTurn() throws Exception {
+		GEMINI_SERVER.enqueue(new MockResponse()
+			.setHeader("Content-Type", "application/json")
+			.setBody("""
+				{
+				  "candidates": [{
+				    "content": {
+				      "parts": [{"text": "Need clarification"}]
+				    }
+				  }]
+				}
+				"""));
+
+		GeminiModelProvider provider = provider();
+		provider.decideNextStep("gemini-2.0-flash", "Be helpful",
+			List.of(
+				message(ConversationMessageRole.USER, "show my orders"),
+				message(ConversationMessageRole.TOOL, "Element not found: #orders"),
+				message(ConversationMessageRole.ASSISTANT, "I could not find orders."),
+				message(ConversationMessageRole.USER, "overview")),
+			List.of(), 0);
+
+		RecordedRequest request = GEMINI_SERVER.takeRequest();
+		String body = request.getBody().readUtf8();
+		assertFalse(body.contains("Element not found: #orders"));
+		assertFalse(body.contains("Tool result observed: Element not found: #orders"));
 	}
 
 	private static GeminiModelProvider provider() {

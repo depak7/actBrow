@@ -7,6 +7,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -28,6 +30,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Component
 public class OpenRouterModelProvider implements ModelProvider {
 
+	private static final Logger log = LoggerFactory.getLogger(OpenRouterModelProvider.class);
 	private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
 	};
 
@@ -169,14 +172,59 @@ public class OpenRouterModelProvider implements ModelProvider {
 		}
 		result.add(Map.of("role", "system", "content", systemContent));
 
-		for (ConversationMessageEntity message : messages) {
+		List<ConversationMessageEntity> window = ModelConversationWindow.forModel(messages);
+		
+		for (int i = 0; i < window.size(); i++) {
+			ConversationMessageEntity message = window.get(i);
 			String role = message.getRole().name().toLowerCase();
-			String content = message.getRole() == ConversationMessageRole.TOOL
-				? "Tool result: " + message.getContent()
-				: message.getContent();
+			String content = message.getContent();
+
+			boolean isToolCalls = content != null && content.contains("ToolCall");
+			if (message.getRole() == ConversationMessageRole.ASSISTANT && isToolCalls) {
+				try {
+					String toolCallId = message.getId().toString();
+					if (content.contains("toolCallId=")) {
+						int start = content.indexOf("toolCallId=") + 11;
+						int end = content.indexOf(",", start);
+						if (end > start) {
+							toolCallId = content.substring(start, end).trim();
+						}
+					}
+					String toolKey = null;
+					if (content.contains("toolKey=")) {
+						int start = content.indexOf("toolKey=") + 7;
+						int end = content.indexOf(",", start);
+						if (end > start) {
+							toolKey = content.substring(start, end).replace("'", "").trim();
+						}
+					}
+					String argsJson = "{}";
+					if (content.contains("arguments={")) {
+						int start = content.indexOf("arguments={") + 11;
+						int end = content.lastIndexOf("}");
+						if (end > start) {
+							argsJson = content.substring(start, end);
+						}
+					}
+					if (toolKey != null) {
+						Map<String, Object> toolCall = new LinkedHashMap<>();
+						toolCall.put("id", toolCallId);
+						toolCall.put("type", "function");
+						Map<String, Object> function = new LinkedHashMap<>();
+						function.put("name", toolKey);
+						function.put("arguments", argsJson);
+						toolCall.put("function", function);
+						result.add(Map.of("role", "assistant", "tool_calls", List.of(toolCall)));
+					}
+				} catch (Exception e) {
+					log.warn("Failed to parse tool_calls: {} - content: {}", e.getMessage(), content.substring(0, Math.min(200, content.length())));
+				}
+				continue;
+			}
 
 			if (message.getRole() == ConversationMessageRole.TOOL) {
-				result.add(Map.of("role", "tool", "content", content, "tool_call_id", message.getId().toString()));
+				String toolCallId = message.getToolCallId() != null ? message.getToolCallId() : message.getId().toString();
+				result.add(Map.of("role", "tool", "content", "Tool result: " + content, "tool_call_id", toolCallId));
 			}
 			else {
 				result.add(Map.of("role", role, "content", content));
@@ -200,7 +248,13 @@ public class OpenRouterModelProvider implements ModelProvider {
 		builder.append("use real function calls only. ");
 		builder.append("When several navigation tools exist, prefer the specific tool whose description matches the request ");
 		builder.append("(follow assistant-configured default paths in each tool description). ");
-		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer.");
+		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer. ");
+		builder.append("Always prioritize the latest user turn over older tool failures or older requests. ");
+		builder.append("Do not mention a previous tool failure unless the latest user turn is clearly continuing that same task. ");
+		builder.append("If the latest user turn is short, ambiguous, or could refer to multiple destinations or actions, ask a clarifying question instead of claiming failure. ");
+		builder.append("When you ask a clarifying question, offer 2 to 4 concrete options and format them exactly like this: ");
+		builder.append("first the question in plain text, then a new line `OPTIONS: option one | option two`, and optionally a new line `RECOMMENDED: option one`. ");
+		builder.append("Do not use the OPTIONS format unless you are actually asking the user to choose.");
 		return builder.toString();
 	}
 
@@ -208,7 +262,7 @@ public class OpenRouterModelProvider implements ModelProvider {
 		return tools.stream()
 			.map(tool -> {
 				Map<String, Object> function = new LinkedHashMap<>();
-				function.put("name", tool.key());
+				function.put("name", sanitizeToolName(tool.key()));
 				function.put("description", ModelToolPresentation.descriptionForModel(tool, objectMapper));
 				function.put("parameters", parseSchema(tool.inputSchema()));
 				Map<String, Object> spec = new LinkedHashMap<>();
@@ -217,6 +271,10 @@ public class OpenRouterModelProvider implements ModelProvider {
 				return spec;
 			})
 			.toList();
+	}
+
+	private String sanitizeToolName(String name) {
+		return name.replace(".", "_").replace("-", "_");
 	}
 
 	private Map<String, Object> parseSchema(String inputSchema) {
@@ -242,7 +300,7 @@ public class OpenRouterModelProvider implements ModelProvider {
 			JsonNode firstCall = toolCalls.path(0);
 			String toolKey = firstCall.path("function").path("name").asText();
 			ToolDescriptor tool = tools.stream()
-				.filter(item -> item.key().equals(toolKey))
+				.filter(item -> sanitizeToolName(item.key()).equals(toolKey) || item.key().equals(toolKey))
 				.findFirst()
 				.orElseThrow(() -> new IllegalArgumentException("OpenRouter requested unknown tool: " + toolKey));
 

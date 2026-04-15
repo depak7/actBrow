@@ -22,6 +22,30 @@
     document.head.appendChild(style);
   }
 
+  function pageTrackerState() {
+    if (typeof window === "undefined") {
+      return { href: "", epoch: 1 };
+    }
+    if (!window.__actbrowPageTracker) {
+      window.__actbrowPageTracker = {
+        href: window.location ? window.location.href : "",
+        epoch: 1
+      };
+    }
+    var tracker = window.__actbrowPageTracker;
+    var href = window.location ? window.location.href : "";
+    var changed = tracker.href !== href;
+    if (changed) {
+      tracker.epoch += 1;
+      tracker.href = href;
+    }
+    return {
+      href: href,
+      epoch: tracker.epoch,
+      changed: changed
+    };
+  }
+
   function createEmitter() {
     var handlers = {};
     return {
@@ -37,12 +61,47 @@
     };
   }
 
-  function readElement(selector) {
-    var element = document.querySelector(selector);
-    if (!element) {
-      throw new Error("Element not found: " + selector);
+  function softToolFailure(toolName, args, message, extras) {
+    var payload = {
+      tool: toolName,
+      arguments: args || {},
+      message: message
+    };
+    if (extras) {
+      Object.keys(extras).forEach(function (key) {
+        payload[key] = extras[key];
+      });
     }
-    return element;
+    return {
+      success: false,
+      structuredOutput: JSON.stringify(payload),
+      textSummary: message,
+      error: message
+    };
+  }
+
+  function readElement(selector) {
+    if (!selector || !String(selector).trim()) {
+      return {
+        element: null,
+        error: "Missing selector"
+      };
+    }
+    try {
+      var element = document.querySelector(selector);
+      if (!element) {
+        return {
+          element: null,
+          error: "Element not found: " + selector
+        };
+      }
+      return { element: element };
+    } catch (error) {
+      return {
+        element: null,
+        error: "Invalid selector: " + selector
+      };
+    }
   }
 
   function isProbablyVisible(el) {
@@ -102,6 +161,7 @@
     if (typeof document === "undefined" || !document.querySelectorAll) {
       return null;
     }
+    var pageState = pageTrackerState();
     var max = (options && options.maxElements) || 60;
     var selectorList = [
       'input:not([type="hidden"])',
@@ -136,9 +196,11 @@
       });
     }
     return {
-      url: typeof location !== "undefined" ? location.href : "",
+      url: pageState.href,
       path: typeof location !== "undefined" ? location.pathname : "",
       title: document.title || "",
+      pageEpoch: pageState.epoch,
+      pageChanged: pageState.changed,
       collectedAt: new Date().toISOString(),
       elements: elements
     };
@@ -147,11 +209,17 @@
   function builtInTools(config) {
     return {
       "dom.query": function (args) {
-        var nodes = Array.prototype.slice.call(document.querySelectorAll(args.selector || ""));
+        var selector = args && args.selector ? args.selector : "";
+        var nodes;
+        try {
+          nodes = Array.prototype.slice.call(document.querySelectorAll(selector));
+        } catch (error) {
+          return softToolFailure("dom.query", args, "Invalid selector: " + selector);
+        }
         return {
           success: true,
           structuredOutput: JSON.stringify({
-            selector: args.selector,
+            selector: selector,
             count: nodes.length,
             matches: nodes.map(function (node) {
               return {
@@ -164,7 +232,11 @@
         };
       },
       "dom.click": function (args) {
-        readElement(args.selector).click();
+        var found = readElement(args.selector);
+        if (!found.element) {
+          return softToolFailure("dom.click", args, found.error);
+        }
+        found.element.click();
         return {
           success: true,
           structuredOutput: JSON.stringify({ selector: args.selector }),
@@ -172,7 +244,11 @@
         };
       },
       "dom.type": function (args) {
-        var element = readElement(args.selector);
+        var found = readElement(args.selector);
+        if (!found.element) {
+          return softToolFailure("dom.type", args, found.error);
+        }
+        var element = found.element;
         element.focus();
         element.value = args.value || "";
         element.dispatchEvent(new Event("input", { bubbles: true }));
@@ -184,7 +260,11 @@
         };
       },
       "dom.read": function (args) {
-        var element = readElement(args.selector);
+        var found = readElement(args.selector);
+        if (!found.element) {
+          return softToolFailure("dom.read", args, found.error);
+        }
+        var element = found.element;
         return {
           success: true,
           structuredOutput: JSON.stringify({
@@ -197,15 +277,35 @@
       },
       "app.navigate": function (args) {
         debugLog(config, "app.navigate invoked", args);
-        if (args.path) {
-          window.location.assign(args.path);
+        var targetPath = args.path || (args.url ? new URL(args.url).pathname : null);
+        if (targetPath) {
+          if (window.location.pathname === targetPath) {
+            debugLog(config, "already on path", targetPath);
+            return {
+              success: true,
+              structuredOutput: JSON.stringify({ path: targetPath, alreadyOnPage: true }),
+              textSummary: "Already on " + targetPath
+            };
+          }
+          history.pushState({}, "", targetPath);
+          window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({ path: targetPath }),
+            textSummary: "Navigated to " + targetPath
+          };
         } else if (args.url) {
           window.location.assign(args.url);
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({ url: args.url }),
+            textSummary: "Navigation requested"
+          };
         }
         return {
-          success: true,
-          structuredOutput: JSON.stringify({ path: args.path || null, url: args.url || null }),
-          textSummary: "Navigation requested"
+          success: false,
+          structuredOutput: null,
+          textSummary: "No path or URL provided"
         };
       },
       "page.screenshot": function () {
@@ -598,6 +698,12 @@
       
       "/* Message Bubbles */",
       ".actbrow-widget-message{max-width:85%;padding:10px 13px;border-radius:16px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word;position:relative;font-family:'Inter',sans-serif;}",
+      ".actbrow-widget-message-body{white-space:pre-wrap;word-break:break-word;}",
+      ".actbrow-widget-message-options{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}",
+      ".actbrow-widget-message-option{border:none;border-radius:999px;background:rgba(255,255,255,.08);color:#e5e5e5;padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.12);transition:all .2s ease;font-family:'Inter',sans-serif;}",
+      ".actbrow-widget-message-option:hover{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.22);}",
+      ".actbrow-widget-message-option-recommended{background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.35);color:#86efac;}",
+      ".actbrow-widget-message-option-recommended:hover{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.45);}",
       ".actbrow-widget-message-user{background:linear-gradient(135deg,#ffffff 0%,#d0d0d0 100%);color:#000;border-bottom-right-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,.3);}",
       ".actbrow-widget-message-assistant{background:rgba(255,255,255,.08);color:#e5e5e5;border:1px solid rgba(255,255,255,.1);border-bottom-left-radius:5px;}",
       ".actbrow-widget-message a{color:#e5e5e5;text-decoration:underline;text-underline-offset:3px;}",
@@ -769,13 +875,49 @@
     var statusMode = "idle";
     var hasSubmittedMessage = false;
     var panelHydrated = false;
+
+    global.__actbrowWidgetElements = { root: root, launcher: launcher };
+
     if (typeof window !== "undefined") {
+      window.addEventListener("popstate", function() {
+        setTimeout(function() {
+          var stored = global.__actbrowWidgetElements;
+          if (stored && stored.root && stored.launcher) {
+            if (!document.body.contains(stored.root)) {
+              config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
+            }
+            if (!document.body.contains(stored.launcher)) {
+              config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
+            }
+          }
+        }, 100);
+      });
       window.addEventListener("pageshow", function (event) {
+        var stored = global.__actbrowWidgetElements;
+        if (stored && stored.root && stored.launcher) {
+          if (!document.body.contains(stored.root)) {
+            config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
+          }
+          if (!document.body.contains(stored.launcher)) {
+            config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
+          }
+        }
         if (event.persisted) {
           client.syncConversationIdFromStorage();
           panelHydrated = false;
         }
       });
+      setTimeout(function() {
+        var stored = global.__actbrowWidgetElements;
+        if (stored && stored.root && stored.launcher) {
+          if (!document.body.contains(stored.root)) {
+            config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
+          }
+          if (!document.body.contains(stored.launcher)) {
+            config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
+          }
+        }
+      }, 1000);
     }
 
     function escapeHtml(value) {
@@ -822,15 +964,90 @@
       return row;
     }
 
-    function appendMessage(role, content) {
+    function appendMessage(role, content, meta) {
       var row = appendRow(role, role === "user" ? (labels.you || "You") : (labels.assistant || "Assistant"));
       var item = document.createElement("div");
       item.className = "actbrow-widget-message " +
         (role === "user" ? "actbrow-widget-message-user" : "actbrow-widget-message-assistant");
-      item.textContent = content;
+      if (role === "assistant") {
+        renderAssistantMessageContent(item, content, meta);
+      } else {
+        item.textContent = content;
+      }
       row.appendChild(item);
       scrollToBottom();
       return row;
+    }
+
+    function parseAssistantOptions(content) {
+      if (!content) {
+        return null;
+      }
+      var lines = String(content).split(/\r?\n/);
+      var optionLineIndex = -1;
+      var options = [];
+      var recommended = null;
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (line.indexOf("OPTIONS:") === 0) {
+          optionLineIndex = i;
+          options = line.slice("OPTIONS:".length).split("|").map(function (part) {
+            return part.trim();
+          }).filter(Boolean);
+        } else if (line.indexOf("RECOMMENDED:") === 0) {
+          recommended = line.slice("RECOMMENDED:".length).trim();
+        }
+      }
+      if (!options.length) {
+        return null;
+      }
+      var visibleLines = lines.filter(function (line, idx) {
+        if (idx === optionLineIndex) {
+          return false;
+        }
+        return line.trim().indexOf("RECOMMENDED:") !== 0;
+      });
+      return {
+        text: visibleLines.join("\n").trim(),
+        options: options,
+        recommended: recommended
+      };
+    }
+
+    function renderAssistantMessageContent(container, content, meta) {
+      var parsed = meta && meta.options && meta.options.length
+        ? {
+            text: meta.content || content,
+            options: meta.options,
+            recommended: meta.recommendedOption || null
+          }
+        : parseAssistantOptions(content);
+      if (!parsed || !parsed.options || !parsed.options.length) {
+        container.textContent = content;
+        return;
+      }
+      var body = document.createElement("div");
+      body.className = "actbrow-widget-message-body";
+      body.textContent = parsed.text || content;
+      container.appendChild(body);
+
+      var options = document.createElement("div");
+      options.className = "actbrow-widget-message-options";
+      parsed.options.forEach(function (optionText) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "actbrow-widget-message-option";
+        if (parsed.recommended && optionText.toLowerCase() === parsed.recommended.toLowerCase()) {
+          button.className += " actbrow-widget-message-option-recommended";
+        }
+        button.textContent = optionText;
+        button.addEventListener("click", function () {
+          openPanel();
+          submitPrompt(optionText);
+        });
+        options.appendChild(button);
+      });
+      container.appendChild(options);
     }
 
     function appendToolActivity(title, meta) {
@@ -1067,7 +1284,7 @@
 
     client.on("assistant.message.completed", function (event) {
       removeThinkingRow();
-      appendMessage("assistant", event.payload.content);
+      appendMessage("assistant", event.payload.content, event.payload);
       setStatus("");
       setSendingState(false);
     });

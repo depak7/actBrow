@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -21,6 +22,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import com.actbrow.actbrow.api.dto.AssistantResponse;
 import com.actbrow.actbrow.api.dto.TenantResponse;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
+import com.actbrow.actbrow.api.dto.KnowledgeDocumentResponse;
 import com.actbrow.actbrow.api.dto.RunEventResponse;
 import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.ToolResponse;
@@ -28,6 +30,7 @@ import com.actbrow.actbrow.model.ToolType;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -341,6 +344,49 @@ class ApiFlowTests {
 	}
 
 	@Test
+	void storesAndListsAssistantKnowledge() {
+		WebTestClient webTestClient = webTestClient();
+
+		AssistantResponse assistant = webTestClient.post()
+			.uri("/v1/assistants")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"key":"support-knowledge","name":"Support Knowledge","systemPrompt":"Handle support","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(AssistantResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		KnowledgeDocumentResponse created = webTestClient.post()
+			.uri("/v1/assistants/%s/knowledge".formatted(assistant.id()))
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"title":"Refund policy","content":"Refunds are allowed within 30 days for annual plans.","source":"Support SOP","enabled":true}
+				""")
+			.exchange()
+			.expectStatus().isCreated()
+			.expectBody(KnowledgeDocumentResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		assertThat(created).isNotNull();
+		assertThat(created.title()).isEqualTo("Refund policy");
+
+		webTestClient.get()
+			.uri("/v1/assistants/%s/knowledge".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBodyList(KnowledgeDocumentResponse.class)
+			.value(docs -> {
+				assertThat(docs).hasSize(1);
+				assertThat(docs.getFirst().title()).isEqualTo("Refund policy");
+				assertThat(docs.getFirst().source()).isEqualTo("Support SOP");
+			});
+	}
+
+	@Test
 	void createsAndAttachesToolInSingleRequest() {
 		WebTestClient webTestClient = webTestClient();
 
@@ -487,6 +533,223 @@ class ApiFlowTests {
 			.uri("/v1/conversations/%s/messages".formatted(conversation.id()))
 			.exchange()
 			.expectStatus().isBadRequest();
+	}
+
+	@Test
+	void ignoresStaleToolFailureAfterPageChangeAndReturnsStructuredClarification() throws Exception {
+		WebTestClient client = webTestClient();
+
+		AssistantResponse assistant = client.post()
+			.uri("/v1/assistants")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"key":"orders-overview-regression","name":"Orders Overview Regression","systemPrompt":"Help with navigation.","model":"gemini-2.0-flash","usePredefinedFlows":false,"tenantId":"%s"}
+				""".formatted(tenantId))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(AssistantResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		ToolResponse ordersTool = client.post()
+			.uri("/v1/tools/attach")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{
+				  "assistantId":"%s",
+				  "key":"orders.regression.open_page",
+				  "displayName":"Open Orders",
+				  "description":"Open the orders page.",
+				  "inputSchema":{"type":"object","properties":{}},
+				  "type":"CLIENT",
+				  "version":"1",
+				  "enabled":true,
+				  "executorRef":"app.navigate",
+				  "defaultArguments":{"path":"/orders"}
+				}
+				""".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isCreated()
+			.expectBody(ToolResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		assertThat(ordersTool).isNotNull();
+
+		ConversationResponse conversation = client.post()
+			.uri("/v1/conversations")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{"assistantId":"%s"}
+				""".formatted(assistant.id()))
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(ConversationResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		GEMINI_SERVER.enqueue(jsonResponse("""
+			{
+			  "candidates": [{
+			    "content": {
+			      "parts": [{
+			        "functionCall": {
+			          "name": "orders.regression.open_page",
+			          "args": {}
+			        }
+			      }]
+			    }
+			  }]
+			}
+			"""));
+		GEMINI_SERVER.enqueue(jsonResponse("""
+			{
+			  "candidates": [{
+			    "content": {
+			      "parts": [{
+			        "text": "I was unable to find your orders. The page for orders could not be found."
+			      }]
+			    }
+			  }]
+			}
+			"""));
+
+		RunResponse firstRun = client.post()
+			.uri("/v1/conversations/%s/turns".formatted(conversation.id()))
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{
+				  "content":"Show my orders",
+				  "pageContext":{"url":"https://app.test/home","path":"/home","title":"Home","pageEpoch":1,"pageChanged":false,"elements":[]}
+				}
+				""")
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(RunResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		FluxExchangeResult<RunEventResponse> firstStream = client.get()
+			.uri("/v1/runs/%s/events".formatted(firstRun.id()))
+			.accept(MediaType.TEXT_EVENT_STREAM)
+			.exchange()
+			.expectStatus().isOk()
+			.returnResult(RunEventResponse.class);
+
+		List<RunEventResponse> firstEvents = firstStream.getResponseBody()
+			.take(2)
+			.collectList()
+			.block(Duration.ofSeconds(5));
+
+		RunEventResponse requested = firstEvents.stream()
+			.filter(event -> "tool.call.requested".equals(event.eventType()))
+			.findFirst()
+			.orElseThrow();
+		String toolCallId = String.valueOf(requested.payload().get("toolCallId"));
+
+		client.post()
+			.uri("/v1/runs/%s/tool-results".formatted(firstRun.id()))
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{
+				  "toolCallId":"%s",
+				  "success":false,
+				  "textSummary":"Element not found: #orders",
+				  "error":"Element not found: #orders"
+				}
+				""".formatted(toolCallId))
+			.exchange()
+			.expectStatus().isOk();
+
+		awaitRunCompletion(client, firstRun.id());
+
+		RecordedRequest firstModelRequest = GEMINI_SERVER.takeRequest(2, TimeUnit.SECONDS);
+		RecordedRequest secondModelRequest = GEMINI_SERVER.takeRequest(2, TimeUnit.SECONDS);
+		assertThat(firstModelRequest).isNotNull();
+		assertThat(secondModelRequest).isNotNull();
+
+		GEMINI_SERVER.enqueue(jsonResponse("""
+			{
+			  "candidates": [{
+			    "content": {
+			      "parts": [{
+			        "text": "Which page did you mean?\\nOPTIONS: Overview | Orders | Profile\\nRECOMMENDED: Overview"
+			      }]
+			    }
+			  }]
+			}
+			"""));
+
+		RunResponse secondRun = client.post()
+			.uri("/v1/conversations/%s/turns".formatted(conversation.id()))
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue("""
+				{
+				  "content":"overview",
+				  "pageContext":{"url":"https://app.test/overview","path":"/overview","title":"Overview","pageEpoch":2,"pageChanged":true,"elements":[]}
+				}
+				""")
+			.exchange()
+			.expectStatus().isOk()
+			.expectBody(RunResponse.class)
+			.returnResult()
+			.getResponseBody();
+
+		FluxExchangeResult<RunEventResponse> secondStream = client.get()
+			.uri("/v1/runs/%s/events".formatted(secondRun.id()))
+			.accept(MediaType.TEXT_EVENT_STREAM)
+			.exchange()
+			.expectStatus().isOk()
+			.returnResult(RunEventResponse.class);
+
+		List<RunEventResponse> secondEvents = secondStream.getResponseBody()
+			.take(2)
+			.collectList()
+			.block(Duration.ofSeconds(5));
+
+		RunEventResponse assistantMessage = secondEvents.stream()
+			.filter(event -> "assistant.message.completed".equals(event.eventType()))
+			.findFirst()
+			.orElseThrow();
+
+		assertThat(assistantMessage.payload().get("content")).isEqualTo("Which page did you mean?");
+		assertThat(assistantMessage.payload().get("clarification")).isEqualTo(true);
+		assertThat(assistantMessage.payload().get("recommendedOption")).isEqualTo("Overview");
+		assertThat(assistantMessage.payload().get("options")).isEqualTo(List.of("Overview", "Orders", "Profile"));
+
+		awaitRunCompletion(client, secondRun.id());
+
+		RecordedRequest thirdModelRequest = GEMINI_SERVER.takeRequest(2, TimeUnit.SECONDS);
+		assertThat(thirdModelRequest).isNotNull();
+		String thirdBody = thirdModelRequest.getBody().readUtf8();
+		assertThat(thirdBody).contains("\\\"pageEpoch\\\":2");
+		assertThat(thirdBody).contains("\\\"pageChanged\\\":true");
+		assertThat(thirdBody).doesNotContain("Tool result observed: Element not found: #orders");
+		assertThat(thirdBody).doesNotContain("Tool result: Element not found: #orders");
+	}
+
+	private RunResponse awaitRunCompletion(WebTestClient client, String runId) {
+		RunResponse finalRun = null;
+		for (int attempt = 0; attempt < 20; attempt++) {
+			finalRun = client.get()
+				.uri("/v1/runs/%s".formatted(runId))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody(RunResponse.class)
+				.returnResult()
+				.getResponseBody();
+			if (finalRun != null && ("COMPLETED".equals(finalRun.status().name()) || "FAILED".equals(finalRun.status().name()))) {
+				return finalRun;
+			}
+			try {
+				Thread.sleep(100);
+			}
+			catch (InterruptedException exception) {
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException("Interrupted while waiting for run completion", exception);
+			}
+		}
+		throw new AssertionError("Run did not finish: " + runId);
 	}
 
 	private static MockResponse jsonResponse(String body) {

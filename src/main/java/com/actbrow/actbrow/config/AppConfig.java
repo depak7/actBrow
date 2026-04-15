@@ -22,7 +22,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 	GroqProperties.class,
 	OpenRouterProperties.class,
 	LlmProperties.class,
-	CorsProperties.class
+	CorsProperties.class,
+	OpenAIProperties.class
 })
 public class AppConfig {
 
