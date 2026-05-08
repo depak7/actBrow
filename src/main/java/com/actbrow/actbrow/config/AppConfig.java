@@ -17,13 +17,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Configuration
 @EnableConfigurationProperties({
 	ActbrowProperties.class,
-	GeminiProperties.class,
 	GoogleOAuthProperties.class,
-	GroqProperties.class,
-	OpenRouterProperties.class,
-	LlmProperties.class,
-	CorsProperties.class,
-	OpenAIProperties.class
+	CorsProperties.class
 })
 public class AppConfig {
 

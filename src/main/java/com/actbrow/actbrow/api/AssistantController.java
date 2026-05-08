@@ -33,9 +33,9 @@ public class AssistantController {
 	}
 
 	@GetMapping
-	public List<AssistantResponse> list(@RequestParam(required = false) String tenantId) {
-		if (tenantId != null && !tenantId.isBlank()) {
-			return assistantService.listByTenant(tenantId);
+	public List<AssistantResponse> list(@RequestParam(required = false) String userId) {
+		if (userId != null && !userId.isBlank()) {
+			return assistantService.listByUser(userId);
 		}
 		return assistantService.list();
 	}

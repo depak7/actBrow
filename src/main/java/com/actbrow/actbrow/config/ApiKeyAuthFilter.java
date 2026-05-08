@@ -13,7 +13,7 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 
-import com.actbrow.actbrow.service.TenantService;
+import com.actbrow.actbrow.service.AssistantService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -25,11 +25,11 @@ public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final Logger log = LoggerFactory.getLogger(ApiKeyAuthFilter.class);
 
-	private final TenantService tenantService;
+	private final AssistantService assistantService;
 	private final ObjectMapper objectMapper;
 
-	public ApiKeyAuthFilter(TenantService tenantService, ObjectMapper objectMapper) {
-		this.tenantService = tenantService;
+	public ApiKeyAuthFilter(AssistantService assistantService, ObjectMapper objectMapper) {
+		this.assistantService = assistantService;
 		this.objectMapper = objectMapper;
 	}
 
@@ -56,20 +56,13 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 
 		try {
-			var tenant = tenantService.findByApiKey(apiKey);
-			if (!tenant.isEnabled()) {
-				return unauthorized(exchange, "Tenant is disabled");
-			}
-			// Strip any caller-supplied tenant headers before adding the resolved values
-			// to prevent tenant identity spoofing.
+			var assistant = assistantService.findByApiKey(apiKey);
+			// Strip any caller-supplied assistant headers before adding the resolved id
+			// to prevent assistant identity spoofing.
 			ServerWebExchange authenticatedExchange = exchange.mutate()
 				.request(exchange.getRequest().mutate()
-					.headers(h -> {
-						h.remove("X-Tenant-Id");
-						h.remove("X-Tenant-Key");
-					})
-					.header("X-Tenant-Id", tenant.getId())
-					.header("X-Tenant-Key", tenant.getKey())
+					.headers(h -> h.remove("X-Assistant-Id"))
+					.header("X-Assistant-Id", assistant.getId())
 					.build())
 				.build();
 			return chain.filter(authenticatedExchange);
@@ -81,6 +74,9 @@ public class ApiKeyAuthFilter implements WebFilter {
 
 	/**
 	 * Unauthenticated routes. Paths use segment boundaries: {@code /v1/foo} does not match {@code /v1/foobar}.
+	 *
+	 * Dashboard ops on {@code /v1/assistants} are open at v1 — see the README's "Self-hosted single-developer
+	 * mode" note. Wire Google-OAuth-session auth before deploying multi-customer.
 	 */
 	private boolean isPublicRoute(String method, String path) {
 		if ("GET".equalsIgnoreCase(method) && "/health".equals(path)) {
@@ -89,10 +85,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 		if (segmentsMatch(path, "/v1/waitlist")) {
 			return true;
 		}
-		if ("POST".equalsIgnoreCase(method) && "/v1/tenants".equals(path)) {
-			return true;
-		}
-		if ("POST".equalsIgnoreCase(method) && "/v1/tenants/validate-key".equals(path)) {
+		if (segmentsMatch(path, "/v1/assistants")) {
 			return true;
 		}
 		if ("/actbrow-sdk.js".equals(path) || "/actbrow-widget.js".equals(path)) {

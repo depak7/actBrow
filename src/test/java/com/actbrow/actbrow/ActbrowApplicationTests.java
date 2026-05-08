@@ -4,8 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest(properties = {
-	"actbrow.gemini.api-key=test-key",
-	"actbrow.gemini.base-url=http://localhost:9999/v1beta",
+	"spring.ai.openai.api-key=test-key",
+	"spring.ai.openai.base-url=http://localhost:9999",
+	"spring.ai.openai.chat.options.model=deepseek-chat",
 	"spring.datasource.url=jdbc:h2:mem:actbrow-test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE",
 	"spring.datasource.driver-class-name=org.h2.Driver",
 	"spring.datasource.username=sa",

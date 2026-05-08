@@ -104,6 +104,202 @@
     }
   }
 
+  /**
+   * Finds el in open shadow roots (depth-first). Used when the host app wraps content in web components.
+   */
+  function querySelectorInOpenShadowRoots(selector, root, maxHosts) {
+    if (typeof document === "undefined" || !root || !root.querySelector) {
+      return null;
+    }
+    var cap = typeof maxHosts === "number" ? maxHosts : 800;
+    try {
+      var direct = root.querySelector(selector);
+      if (direct) {
+        return direct;
+      }
+    } catch (e) {
+      return null;
+    }
+    var hosts = root.querySelectorAll("*");
+    var n = Math.min(hosts.length, cap);
+    for (var i = 0; i < n; i++) {
+      var h = hosts[i];
+      if (h.shadowRoot) {
+        try {
+          var inner = h.shadowRoot.querySelector(selector);
+          if (inner) {
+            return inner;
+          }
+          var deep = querySelectorInOpenShadowRoots(selector, h.shadowRoot, Math.floor(cap / 2));
+          if (deep) {
+            return deep;
+          }
+        } catch (err) {}
+      }
+    }
+    return null;
+  }
+
+  /**
+   * When the model's selector does not match (casing, SPA delay), try aria-label and visible text.
+   */
+  function fuzzyFindByAriaOrText(selector, root) {
+    root = root || document;
+    var s = String(selector);
+    var rawTag = s.split(/[\[\s>+~]/)[0].trim().toLowerCase();
+    var tagHint = rawTag.split(/[.#:]/)[0];
+    if (!tagHint || tagHint === "*" || tagHint === ">") {
+      tagHint = "";
+    }
+
+    var mContains = s.match(/\[aria-label\*=\s*['"]([^'"]*)['"]\]/i);
+    var mExact = s.match(/\[aria-label\s*=\s*['"]([^'"]*)['"]\]/i);
+    var needle = mContains ? mContains[1] : mExact ? mExact[1] : null;
+    var useContains = !!mContains;
+    if (!needle) {
+      return null;
+    }
+    var wantLower = needle.toLowerCase();
+    var candidates;
+    try {
+      if (tagHint === "button" || tagHint === "input") {
+        candidates = root.querySelectorAll(
+          'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]'
+        );
+      } else if (tagHint === "a") {
+        candidates = root.querySelectorAll('a[href]');
+      } else {
+        candidates = root.querySelectorAll(
+          'button, a[href], [role="button"], [role="link"], input[type="button"], input[type="submit"]'
+        );
+      }
+    } catch (e) {
+      return null;
+    }
+
+    var i;
+    var el;
+    var al;
+    var j;
+    for (i = 0; i < candidates.length; i++) {
+      el = candidates[i];
+      al = el.getAttribute && el.getAttribute("aria-label");
+      if (!al) {
+        continue;
+      }
+      var alLower = al.toLowerCase();
+      if (useContains) {
+        if (alLower.indexOf(wantLower) >= 0) {
+          return el;
+        }
+      } else if (alLower === wantLower) {
+        return el;
+      }
+    }
+    for (j = 0; j < candidates.length; j++) {
+      el = candidates[j];
+      var txt = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (useContains && txt.indexOf(wantLower) >= 0) {
+        return el;
+      }
+      if (!useContains && txt === wantLower) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function fuzzyFindInShadowHosts(selector) {
+    if (!document.body || !document.body.querySelectorAll) {
+      return null;
+    }
+    var hosts = document.body.querySelectorAll("*");
+    var limit = Math.min(hosts.length, 800);
+    var h;
+    var hit;
+    for (h = 0; h < limit; h++) {
+      if (hosts[h].shadowRoot) {
+        hit = fuzzyFindByAriaOrText(selector, hosts[h].shadowRoot);
+        if (hit) {
+          return hit;
+        }
+      }
+    }
+    return null;
+  }
+
+  function resolveDomTarget(selector) {
+    var trimmed = selector && String(selector).trim();
+    if (!trimmed) {
+      return { element: null, error: "Missing selector" };
+    }
+    try {
+      var el = document.querySelector(trimmed);
+      if (el) {
+        return { element: el };
+      }
+    } catch (err) {
+      return { element: null, error: "Invalid selector: " + trimmed };
+    }
+    el = querySelectorInOpenShadowRoots(trimmed, document);
+    if (el) {
+      return { element: el };
+    }
+    el = fuzzyFindByAriaOrText(trimmed, document);
+    if (el) {
+      return { element: el };
+    }
+    el = fuzzyFindInShadowHosts(trimmed);
+    if (el) {
+      return { element: el };
+    }
+    return {
+      element: null,
+      error: "Element not found: " + trimmed
+    };
+  }
+
+  function waitForDomTarget(selector, maxWaitMs) {
+    var deadline = Date.now() + (typeof maxWaitMs === "number" ? maxWaitMs : 3500);
+    var interval = 45;
+    return new Promise(function (resolve) {
+      function tryOnce() {
+        var found = resolveDomTarget(selector);
+        if (found.element) {
+          resolve(found);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve(found);
+          return;
+        }
+        setTimeout(tryOnce, interval);
+      }
+      tryOnce();
+    });
+  }
+
+  function activateClick(element) {
+    if (!element || typeof element.scrollIntoView === "function") {
+      try {
+        element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      } catch (e) {
+        try {
+          element.scrollIntoView(true);
+        } catch (e2) {}
+      }
+    }
+    try {
+      element.click();
+      return;
+    } catch (e1) {}
+    try {
+      element.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, view: typeof window !== "undefined" ? window : undefined })
+      );
+    } catch (e2) {}
+  }
+
   function isProbablyVisible(el) {
     if (!el || typeof el.getBoundingClientRect !== "function") {
       return true;
@@ -232,48 +428,56 @@
         };
       },
       "dom.click": function (args) {
-        var found = readElement(args.selector);
-        if (!found.element) {
-          return softToolFailure("dom.click", args, found.error);
-        }
-        found.element.click();
-        return {
-          success: true,
-          structuredOutput: JSON.stringify({ selector: args.selector }),
-          textSummary: "Clicked " + args.selector
-        };
+        var sel = args && args.selector ? args.selector : "";
+        return waitForDomTarget(sel, 4000).then(function (found) {
+          if (!found.element) {
+            return softToolFailure("dom.click", args, found.error);
+          }
+          activateClick(found.element);
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({ selector: args.selector }),
+            textSummary: "Clicked " + args.selector
+          };
+        });
       },
       "dom.type": function (args) {
-        var found = readElement(args.selector);
-        if (!found.element) {
-          return softToolFailure("dom.type", args, found.error);
-        }
-        var element = found.element;
-        element.focus();
-        element.value = args.value || "";
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        element.dispatchEvent(new Event("change", { bubbles: true }));
-        return {
-          success: true,
-          structuredOutput: JSON.stringify({ selector: args.selector, value: args.value || "" }),
-          textSummary: "Typed into " + args.selector
-        };
+        var sel = args && args.selector ? args.selector : "";
+        return waitForDomTarget(sel, 4000).then(function (found) {
+          if (!found.element) {
+            return softToolFailure("dom.type", args, found.error);
+          }
+          var element = found.element;
+          try {
+            element.focus();
+          } catch (e) {}
+          element.value = (args && args.value) || "";
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({ selector: args.selector, value: (args && args.value) || "" }),
+            textSummary: "Typed into " + args.selector
+          };
+        });
       },
       "dom.read": function (args) {
-        var found = readElement(args.selector);
-        if (!found.element) {
-          return softToolFailure("dom.read", args, found.error);
-        }
-        var element = found.element;
-        return {
-          success: true,
-          structuredOutput: JSON.stringify({
-            selector: args.selector,
-            text: element.innerText || "",
-            value: element.value || null
-          }),
-          textSummary: "Read " + args.selector
-        };
+        var sel = args && args.selector ? args.selector : "";
+        return waitForDomTarget(sel, 4000).then(function (found) {
+          if (!found.element) {
+            return softToolFailure("dom.read", args, found.error);
+          }
+          var element = found.element;
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({
+              selector: args.selector,
+              text: element.innerText || "",
+              value: element.value || null
+            }),
+            textSummary: "Read " + args.selector
+          };
+        });
       },
       "app.navigate": function (args) {
         debugLog(config, "app.navigate invoked", args);
@@ -368,6 +572,75 @@
     var currentConversationId = readStoredConversationId();
     var activeRunEventSource = null;
 
+    // Persist the active runId so we can reconnect after SPA navigation
+    var runStorageKey = "actbrow:run:" + config.assistantId;
+    // Persist tool results that have not yet been acknowledged by the server. A hard page
+    // refresh during app.navigate kills any in-flight fetch(); on the next page load we
+    // replay these before reopening the SSE stream so the run history stays well-formed.
+    var pendingResultsStorageKey = "actbrow:pendingResults:" + config.assistantId;
+
+    function readStoredRunId() {
+      try {
+        return sessionStorage.getItem(runStorageKey);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function writeStoredRunId(id) {
+      try {
+        if (id) {
+          sessionStorage.setItem(runStorageKey, id);
+        }
+      } catch (e) {}
+    }
+
+    function clearStoredRunId() {
+      try {
+        sessionStorage.removeItem(runStorageKey);
+      } catch (e) {}
+    }
+
+    function readPendingResults() {
+      try {
+        var raw = sessionStorage.getItem(pendingResultsStorageKey);
+        if (!raw) return [];
+        var parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function writePendingResults(list) {
+      try {
+        if (!list || list.length === 0) {
+          sessionStorage.removeItem(pendingResultsStorageKey);
+        } else {
+          sessionStorage.setItem(pendingResultsStorageKey, JSON.stringify(list));
+        }
+      } catch (e) {}
+    }
+
+    function addPendingResult(runId, body) {
+      var list = readPendingResults();
+      list.push({ runId: runId, body: body, ts: Date.now() });
+      writePendingResults(list);
+    }
+
+    function removePendingResult(toolCallId) {
+      var list = readPendingResults().filter(function (entry) {
+        return !entry.body || entry.body.toolCallId !== toolCallId;
+      });
+      writePendingResults(list);
+    }
+
+    function clearPendingResults() {
+      try {
+        sessionStorage.removeItem(pendingResultsStorageKey);
+      } catch (e) {}
+    }
+
     function normalizeApiKey(key) {
       if (key == null) {
         return "";
@@ -456,11 +729,54 @@
     }
 
     function postToolResult(runId, body) {
+      // Persist BEFORE firing the fetch so a mid-flight page unload (e.g. app.navigate
+      // hard-refresh) does not drop the tool result. On success we remove the entry.
+      addPendingResult(runId, body);
       return request("/v1/runs/" + runId + "/tool-results", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
+      }).then(function (response) {
+        removePendingResult(body.toolCallId);
+        return response;
+      }).catch(function (error) {
+        // Leave the entry in sessionStorage; flushPendingToolResults will retry on next boot.
+        debugLog(config, "postToolResult failed, will retry on boot", error);
+        throw error;
       });
+    }
+
+    function flushPendingToolResults() {
+      var list = readPendingResults();
+      if (!list.length) return Promise.resolve();
+      debugLog(config, "flushing pending tool results", list.length);
+      // Drain sequentially so order is preserved for the same run.
+      return list.reduce(function (prev, entry) {
+        return prev.then(function () {
+          return fetch(config.baseUrl + "/v1/runs/" + entry.runId + "/tool-results", {
+            method: "POST",
+            headers: (function () {
+              var h = { "Content-Type": "application/json" };
+              if (resolvedApiKey) {
+                h["Authorization"] = "Bearer " + resolvedApiKey;
+                h["X-API-Key"] = resolvedApiKey;
+              }
+              return h;
+            })(),
+            body: JSON.stringify(entry.body)
+          }).then(function (response) {
+            // On 4xx (run deleted, conversation gone, already completed), drop the entry.
+            // Otherwise it would replay on every page load forever.
+            if (response.ok || (response.status >= 400 && response.status < 500)) {
+              removePendingResult(entry.body.toolCallId);
+            } else {
+              debugLog(config, "pending result replay got transient status, keeping", response.status);
+            }
+          }).catch(function (error) {
+            debugLog(config, "pending result replay network error, keeping", entry.body.toolCallId, error);
+          });
+        });
+      }, Promise.resolve());
     }
 
     function streamRun(runId) {
@@ -477,6 +793,7 @@
       }
       var source = new EventSource(eventsUrl);
       activeRunEventSource = source;
+      writeStoredRunId(runId);
       debugLog(config, "opening run stream", runId);
       source.onopen = function () {
         debugLog(config, "run stream open", runId);
@@ -485,6 +802,7 @@
         if (activeRunEventSource === source) {
           activeRunEventSource = null;
         }
+        clearStoredRunId();
         try {
           source.close();
         } catch (e) {}
@@ -545,11 +863,16 @@
           activeRunEventSource = null;
         }
         clearStoredConversationId();
+        clearStoredRunId();
+        clearPendingResults();
         currentConversationId = null;
       },
       /**
        * Closes the run event stream, clears local persistence immediately (so navigation / reopen cannot
        * resurrect the old thread), then DELETE on the server. Server errors are ignored.
+       *
+       * Also clears any pending tool results queued for the previous run — otherwise the new chat
+       * would replay them against a deleted conversation, causing 404s and leaked storage.
        */
       resetConversationForNewChat: function () {
         if (activeRunEventSource) {
@@ -560,6 +883,8 @@
         }
         var id = currentConversationId || readStoredConversationId();
         clearStoredConversationId();
+        clearStoredRunId();
+        clearPendingResults();
         currentConversationId = null;
         if (!id) {
           return Promise.resolve();
@@ -620,6 +945,26 @@
         return currentConversationId
           ? Promise.resolve({ id: currentConversationId })
           : this.startConversation();
+      },
+      /**
+       * Re-subscribe to an in-progress run SSE stream after SPA navigation.
+       * Safe to call on every page load; no-ops if no run is stored or stream is already open.
+       *
+       * Flushes any tool results that were persisted but not acknowledged on the previous page
+       * (e.g. a hard-refresh killed the fetch mid-flight) before reopening the stream. This
+       * unblocks the server-side run loop so the next model step can proceed.
+       */
+      syncRunFromStorage: function () {
+        var storedRunId = readStoredRunId();
+        if (!storedRunId || activeRunEventSource) {
+          return;
+        }
+        debugLog(config, "reconnecting to run after navigation", storedRunId);
+        flushPendingToolResults().then(function () {
+          if (!activeRunEventSource) {
+            streamRun(storedRunId);
+          }
+        });
       },
       on: emitter.on
     };
@@ -869,6 +1214,8 @@
       debug: !!config.debug
     });
     global.ActbrowWidgetClient = client;
+    // Reconnect any in-progress run from a previous page load or hard refresh
+    client.syncRunFromStorage();
     var isOpen = false;
     var isSending = false;
     var thinkingRow = null;
@@ -890,6 +1237,8 @@
               config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
             }
           }
+          // Reconnect any in-progress run SSE stream after SPA navigation
+          client.syncRunFromStorage();
         }, 100);
       });
       window.addEventListener("pageshow", function (event) {
@@ -904,6 +1253,7 @@
         }
         if (event.persisted) {
           client.syncConversationIdFromStorage();
+          client.syncRunFromStorage();
           panelHydrated = false;
         }
       });

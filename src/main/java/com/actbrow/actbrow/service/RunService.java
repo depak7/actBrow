@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import com.actbrow.actbrow.agent.FinalResponseDecision;
 import com.actbrow.actbrow.agent.ModelDecision;
 import com.actbrow.actbrow.agent.ModelProvider;
+import com.actbrow.actbrow.agent.ToolCall;
 import com.actbrow.actbrow.agent.ToolCallDecision;
 import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.agent.ToolExecutionResult;
@@ -120,6 +121,10 @@ public class RunService {
 
 	/**
 	 * Removes all runs, steps, messages, and the conversation row. Idempotent if the conversation is already gone.
+	 *
+	 * Also releases any pending client-tool futures for the deleted runs so virtual threads waiting
+	 * on a tool result unblock immediately instead of timing out and attempting to save against a
+	 * row that no longer exists.
 	 */
 	@Transactional
 	public void deleteConversationCascade(String conversationId) {
@@ -129,13 +134,17 @@ public class RunService {
 		List<RunEntity> runs = runRepository.findAllByConversationId(conversationId);
 		for (RunEntity run : runs) {
 			String runId = run.getId();
+			cancelledRuns.add(runId);
+			pendingClientToolStore.cancelByRunId(runId);
 			startedRuns.remove(runId);
-			cancelledRuns.remove(runId);
 			eventBroker.dispose(runId);
 			runStepRepository.deleteByRunId(runId);
 		}
 		runRepository.deleteAll(runs);
 		conversationService.deleteMessagesAndConversation(conversationId);
+		for (RunEntity run : runs) {
+			cancelledRuns.remove(run.getId());
+		}
 	}
 
 	public void submitClientToolResult(String runId, String toolCallId, ToolExecutionResult result) {
@@ -179,7 +188,19 @@ public class RunService {
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.ASSISTANT,
 						finalResponse.message());
 					recordStep(runId, stepIndex, RunStepType.FINAL_RESPONSE, finalResponse.message());
-					eventBroker.emit(runId, "assistant.message.completed", Map.of("content", finalResponse.message()));
+					Map<String, Object> completedPayload = new LinkedHashMap<>();
+					ClarificationResponseParser.ParsedClarification clarification = ClarificationResponseParser
+						.parse(finalResponse.message());
+					if (clarification != null) {
+						completedPayload.put("content", clarification.visibleContent());
+						completedPayload.put("clarification", true);
+						completedPayload.put("options", clarification.options());
+						completedPayload.put("recommendedOption", clarification.recommendedOption());
+					}
+					else {
+						completedPayload.put("content", finalResponse.message());
+					}
+					eventBroker.emit(runId, "assistant.message.completed", completedPayload);
 					run.setStatus(RunStatus.COMPLETED);
 					run.setCompletedAt(Instant.now());
 					runRepository.save(run);
@@ -188,38 +209,60 @@ public class RunService {
 				}
 
 				ToolCallDecision toolCallDecision = (ToolCallDecision) decision;
-				ToolDescriptor tool = tools.stream()
-					.filter(item -> item.id().equals(toolCallDecision.toolCall().toolId()))
-					.findFirst()
-					.orElseThrow(() -> new IllegalArgumentException("Unknown tool requested by model"));
-				Map<String, Object> executionArguments = mergeArguments(tool, toolCallDecision.toolCall().arguments());
-				String executorKey = resolveExecutorKey(tool);
-				eventBroker.emit(runId, "tool.call.requested", Map.of(
-					"toolCallId", toolCallDecision.toolCall().toolCallId(),
-					"toolId", tool.id(),
-					"toolKey", tool.key(),
-					"executorKey", executorKey,
-					"type", wireToolTypeForClients(tool),
-					"arguments", executionArguments));
-				recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCallDecision.toolCall().toString());
 
-				ToolExecutionResult result = executeTool(run, toolCallDecision, tool, executionArguments);
-				String toolMessage = result.textSummary() != null ? result.textSummary()
-					: result.structuredOutput() != null ? result.structuredOutput() : result.error();
-				conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage);
-				recordStep(runId, stepIndex, RunStepType.TOOL_RESULT, result.toString());
-				Map<String, Object> payload = new LinkedHashMap<>();
-				payload.put("toolCallId", toolCallDecision.toolCall().toolCallId());
-				payload.put("success", result.success());
-				payload.put("structuredOutput", result.structuredOutput());
-				payload.put("textSummary", result.textSummary());
-				payload.put("error", result.error());
-				eventBroker.emit(runId, "tool.call.completed", payload);
+				// Store the ASSISTANT tool-calls message so providers can reconstruct valid API history
+				conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.ASSISTANT,
+					buildAssistantToolCallsJson(toolCallDecision.toolCalls()));
+
+				// Execute each tool call sequentially within this step
+				for (ToolCall toolCall : toolCallDecision.toolCalls()) {
+					if (cancelledRuns.contains(runId)) {
+						cancelRunInternal(run);
+						return;
+					}
+					ToolDescriptor tool = tools.stream()
+						.filter(item -> item.id().equals(toolCall.toolId()))
+						.findFirst()
+						.orElseThrow(() -> new IllegalArgumentException("Unknown tool requested by model: " + toolCall.toolKey()));
+					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
+					String executorKey = resolveExecutorKey(tool);
+					eventBroker.emit(runId, "tool.call.requested", Map.of(
+						"toolCallId", toolCall.toolCallId(),
+						"toolId", tool.id(),
+						"toolKey", tool.key(),
+						"executorKey", executorKey,
+						"type", wireToolTypeForClients(tool),
+						"arguments", executionArguments));
+					recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
+
+					ToolExecutionResult result = executeTool(run, toolCall, tool, executionArguments);
+					String toolMessage = result.textSummary() != null ? result.textSummary()
+						: result.structuredOutput() != null ? result.structuredOutput() : result.error();
+					// Store TOOL message with its toolCallId so providers can pair it with the ASSISTANT entry
+					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
+						toolCall.toolCallId());
+					recordStep(runId, stepIndex, RunStepType.TOOL_RESULT, result.toString());
+					Map<String, Object> payload = new LinkedHashMap<>();
+					payload.put("toolCallId", toolCall.toolCallId());
+					payload.put("success", result.success());
+					payload.put("structuredOutput", result.structuredOutput());
+					payload.put("textSummary", result.textSummary());
+					payload.put("error", result.error());
+					eventBroker.emit(runId, "tool.call.completed", payload);
+				}
 			}
 
 			failRun(run, "Run exceeded max steps");
 		}
+		catch (java.util.concurrent.CancellationException cancellation) {
+			// Run was cancelled externally (e.g. conversation deleted while a client tool was pending).
+			// The conversation and run rows are already gone — do not attempt any further DB writes.
+		}
 		catch (Exception exception) {
+			if (cancelledRuns.contains(runId)) {
+				// Exception surfaced from a cancelled run — swallow to avoid writing to a deleted row.
+				return;
+			}
 			failRun(run, exception.getMessage());
 		}
 		finally {
@@ -236,22 +279,29 @@ public class RunService {
 		eventBroker.complete(run.getId());
 	}
 
-	private ToolExecutionResult executeTool(RunEntity run, ToolCallDecision toolCallDecision, ToolDescriptor tool,
+	private ToolExecutionResult executeTool(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
 		Map<String, Object> executionArguments)
 		throws Exception {
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
 			runRepository.save(run);
 			try {
-				ToolExecutionResult result = pendingClientToolStore.register(toolCallDecision.toolCall().toolCallId())
+				ToolExecutionResult result = pendingClientToolStore.register(run.getId(), toolCall.toolCallId())
 					.get(properties.toolTimeout().toMillis(), TimeUnit.MILLISECONDS);
 				run.setStatus(RunStatus.IN_PROGRESS);
 				runRepository.save(run);
 				return result;
 			}
 			catch (TimeoutException e) {
-				pendingClientToolStore.cancel(toolCallDecision.toolCall().toolCallId());
-				throw e;
+				// Client never posted a tool result (e.g. hard page refresh killed the SDK mid-navigation).
+				// Return a synthetic failure so the caller still appends a TOOL message paired with the
+				// assistant tool_calls entry. Without this, history would be left with an orphan tool_calls
+				// and OpenAI rejects the next turn.
+				pendingClientToolStore.cancel(toolCall.toolCallId());
+				run.setStatus(RunStatus.IN_PROGRESS);
+				runRepository.save(run);
+				String message = "Client tool timed out after " + properties.toolTimeout().toMillis() + "ms";
+				return new ToolExecutionResult(false, null, message, message);
 			}
 		}
 		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
@@ -305,6 +355,30 @@ public class RunService {
 		Map<String, Object> defs = tool.defaultArguments();
 		return defs != null && defs.containsKey("path") && defs.get("path") != null
 			&& !String.valueOf(defs.get("path")).isBlank();
+	}
+
+	private String buildAssistantToolCallsJson(List<ToolCall> toolCalls) {
+		try {
+			List<Map<String, Object>> calls = toolCalls.stream().map(tc -> {
+				Map<String, Object> function = new LinkedHashMap<>();
+				function.put("name", tc.toolKey());
+				try {
+					function.put("arguments", objectMapper.writeValueAsString(tc.arguments()));
+				}
+				catch (JsonProcessingException e) {
+					function.put("arguments", "{}");
+				}
+				Map<String, Object> call = new LinkedHashMap<>();
+				call.put("id", tc.toolCallId());
+				call.put("type", "function");
+				call.put("function", function);
+				return call;
+			}).toList();
+			return "[tool_calls]" + objectMapper.writeValueAsString(calls) + "[/tool_calls]";
+		}
+		catch (JsonProcessingException e) {
+			return "[tool_calls][][/tool_calls]";
+		}
 	}
 
 	private void failRun(RunEntity run, String error) {

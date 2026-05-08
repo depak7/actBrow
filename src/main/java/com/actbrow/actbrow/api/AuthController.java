@@ -1,10 +1,7 @@
 package com.actbrow.actbrow.api;
 
-import java.security.SecureRandom;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,9 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.actbrow.actbrow.model.TenantEntity;
 import com.actbrow.actbrow.model.UserEntity;
-import com.actbrow.actbrow.repository.TenantRepository;
 import com.actbrow.actbrow.repository.UserRepository;
 import com.actbrow.actbrow.service.GoogleIdTokenVerifier;
 
@@ -24,54 +19,11 @@ import com.actbrow.actbrow.service.GoogleIdTokenVerifier;
 public class AuthController {
 
 	private final UserRepository userRepository;
-	private final TenantRepository tenantRepository;
 	private final GoogleIdTokenVerifier googleIdTokenVerifier;
 
-	public AuthController(UserRepository userRepository, TenantRepository tenantRepository,
-		GoogleIdTokenVerifier googleIdTokenVerifier) {
+	public AuthController(UserRepository userRepository, GoogleIdTokenVerifier googleIdTokenVerifier) {
 		this.userRepository = userRepository;
-		this.tenantRepository = tenantRepository;
 		this.googleIdTokenVerifier = googleIdTokenVerifier;
-	}
-
-	@PostMapping("/create-tenant")
-	public ResponseEntity<?> createTenant(@RequestBody Map<String, String> body) {
-		String name = body.get("name");
-		String key = body.get("key");
-
-		if (name == null || key == null) {
-			return ResponseEntity.badRequest().body(Map.of("error", "name and key are required"));
-		}
-
-		// Create a temporary user (since we don't have Google login)
-		String tempEmail = "user-" + UUID.randomUUID().toString().substring(0, 8) + "@local";
-		UserEntity user = new UserEntity();
-		user.setId(UUID.randomUUID().toString());
-		user.setEmail(tempEmail);
-		user.setFullName(name);
-		user.setGoogleId("local-" + UUID.randomUUID().toString());
-		user = userRepository.save(user);
-
-		// Create tenant with API key
-		TenantEntity tenant = new TenantEntity();
-		tenant.setUserId(user.getId());
-		tenant.setKey(key);
-		tenant.setName(name);
-		tenant.setApiKey(generateApiKey());
-		tenant.setEnabled(true);
-		tenant = tenantRepository.save(tenant);
-
-		return ResponseEntity.ok(Map.of(
-			"success", true,
-			"apiKey", tenant.getApiKey(),
-			"tenantId", tenant.getId(),
-			"tenantKey", tenant.getKey(),
-			"user", Map.of(
-				"id", user.getId(),
-				"email", user.getEmail(),
-				"fullName", user.getFullName()
-			)
-		));
 	}
 
 	@PostMapping("/google")
@@ -121,7 +73,6 @@ public class AuthController {
 		final String resolvedFullName = fullName;
 		final String resolvedPictureUrl = pictureUrl;
 
-		// Find or create user
 		UserEntity user = userRepository.findByGoogleId(resolvedGoogleId)
 			.orElseGet(() -> {
 				UserEntity newUser = new UserEntity();
@@ -132,18 +83,6 @@ public class AuthController {
 				return userRepository.save(newUser);
 			});
 
-		// Find or create tenant with API key
-		TenantEntity tenant = tenantRepository.findByUserId(user.getId())
-			.orElseGet(() -> {
-				TenantEntity newTenant = new TenantEntity();
-				newTenant.setUserId(user.getId());
-				newTenant.setKey(resolvedEmail.split("@")[0].toLowerCase().replaceAll("[^a-z0-9]", "-"));
-				newTenant.setName(resolvedFullName != null ? resolvedFullName : resolvedEmail.split("@")[0]);
-				newTenant.setApiKey(generateApiKey());
-				newTenant.setEnabled(true);
-				return tenantRepository.save(newTenant);
-			});
-
 		Map<String, Object> userJson = new LinkedHashMap<>();
 		userJson.put("id", user.getId());
 		userJson.put("email", user.getEmail());
@@ -151,23 +90,14 @@ public class AuthController {
 		userJson.put("pictureUrl", user.getProfilePictureUrl());
 		return ResponseEntity.ok(Map.of(
 			"success", true,
-			"apiKey", tenant.getApiKey(),
-			"tenantId", tenant.getId(),
-			"tenantKey", tenant.getKey(),
 			"user", userJson
 		));
 	}
 
 	@GetMapping("/me")
 	public ResponseEntity<?> getCurrentUser() {
-		// This endpoint is not protected - frontend should handle auth state
+		// Dashboard auth is currently unauthenticated. Frontend manages session state via the
+		// userId returned from /auth/google. Wire proper session/JWT before multi-customer deploy.
 		return ResponseEntity.ok(Map.of("authenticated", false));
-	}
-
-	private String generateApiKey() {
-		SecureRandom random = new SecureRandom();
-		byte[] bytes = new byte[32];
-		random.nextBytes(bytes);
-		return "ak_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
 	}
 }

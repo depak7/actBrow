@@ -31,8 +31,11 @@ public class AssistantDefinitionEntity {
 	@Column(nullable = false)
 	private boolean usePredefinedFlows;
 
-	@Column(name = "tenant_id")
-	private String tenantId;
+	@Column(name = "api_key", nullable = false, unique = true)
+	private String apiKey;
+
+	@Column(name = "user_id", nullable = false)
+	private String userId;
 
 	@Column(nullable = false)
 	private Instant createdAt;
@@ -95,12 +98,20 @@ public class AssistantDefinitionEntity {
 		this.usePredefinedFlows = usePredefinedFlows;
 	}
 
-	public String getTenantId() {
-		return tenantId;
+	public String getApiKey() {
+		return apiKey;
 	}
 
-	public void setTenantId(String tenantId) {
-		this.tenantId = tenantId;
+	public void setApiKey(String apiKey) {
+		this.apiKey = apiKey;
+	}
+
+	public String getUserId() {
+		return userId;
+	}
+
+	public void setUserId(String userId) {
+		this.userId = userId;
 	}
 
 	public Instant getCreatedAt() {
