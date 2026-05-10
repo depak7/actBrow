@@ -80,224 +80,103 @@
     };
   }
 
-  function readElement(selector) {
-    if (!selector || !String(selector).trim()) {
-      return {
-        element: null,
-        error: "Missing selector"
-      };
-    }
-    try {
-      var element = document.querySelector(selector);
-      if (!element) {
-        return {
-          element: null,
-          error: "Element not found: " + selector
-        };
-      }
-      return { element: element };
-    } catch (error) {
-      return {
-        element: null,
-        error: "Invalid selector: " + selector
-      };
-    }
-  }
-
   /**
-   * Finds el in open shadow roots (depth-first). Used when the host app wraps content in web components.
+   * Resolve once the DOM has been quiet (no mutations) for `idleMs`. Caps total wait at
+   * `maxMs` so a continuously animating page can't hang the run. Used before
+   * page.screenshot so React route changes finish hydrating before we read innerText.
    */
-  function querySelectorInOpenShadowRoots(selector, root, maxHosts) {
-    if (typeof document === "undefined" || !root || !root.querySelector) {
-      return null;
+  function waitForDomStable(idleMs, maxMs) {
+    var idleTarget = typeof idleMs === "number" ? idleMs : 500;
+    var deadline = Date.now() + (typeof maxMs === "number" ? maxMs : 4000);
+    if (typeof MutationObserver === "undefined" || !document.body) {
+      return new Promise(function (resolve) { setTimeout(resolve, idleTarget); });
     }
-    var cap = typeof maxHosts === "number" ? maxHosts : 800;
-    try {
-      var direct = root.querySelector(selector);
-      if (direct) {
-        return direct;
-      }
-    } catch (e) {
-      return null;
-    }
-    var hosts = root.querySelectorAll("*");
-    var n = Math.min(hosts.length, cap);
-    for (var i = 0; i < n; i++) {
-      var h = hosts[i];
-      if (h.shadowRoot) {
-        try {
-          var inner = h.shadowRoot.querySelector(selector);
-          if (inner) {
-            return inner;
-          }
-          var deep = querySelectorInOpenShadowRoots(selector, h.shadowRoot, Math.floor(cap / 2));
-          if (deep) {
-            return deep;
-          }
-        } catch (err) {}
-      }
-    }
-    return null;
-  }
-
-  /**
-   * When the model's selector does not match (casing, SPA delay), try aria-label and visible text.
-   */
-  function fuzzyFindByAriaOrText(selector, root) {
-    root = root || document;
-    var s = String(selector);
-    var rawTag = s.split(/[\[\s>+~]/)[0].trim().toLowerCase();
-    var tagHint = rawTag.split(/[.#:]/)[0];
-    if (!tagHint || tagHint === "*" || tagHint === ">") {
-      tagHint = "";
-    }
-
-    var mContains = s.match(/\[aria-label\*=\s*['"]([^'"]*)['"]\]/i);
-    var mExact = s.match(/\[aria-label\s*=\s*['"]([^'"]*)['"]\]/i);
-    var needle = mContains ? mContains[1] : mExact ? mExact[1] : null;
-    var useContains = !!mContains;
-    if (!needle) {
-      return null;
-    }
-    var wantLower = needle.toLowerCase();
-    var candidates;
-    try {
-      if (tagHint === "button" || tagHint === "input") {
-        candidates = root.querySelectorAll(
-          'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]'
-        );
-      } else if (tagHint === "a") {
-        candidates = root.querySelectorAll('a[href]');
-      } else {
-        candidates = root.querySelectorAll(
-          'button, a[href], [role="button"], [role="link"], input[type="button"], input[type="submit"]'
-        );
-      }
-    } catch (e) {
-      return null;
-    }
-
-    var i;
-    var el;
-    var al;
-    var j;
-    for (i = 0; i < candidates.length; i++) {
-      el = candidates[i];
-      al = el.getAttribute && el.getAttribute("aria-label");
-      if (!al) {
-        continue;
-      }
-      var alLower = al.toLowerCase();
-      if (useContains) {
-        if (alLower.indexOf(wantLower) >= 0) {
-          return el;
-        }
-      } else if (alLower === wantLower) {
-        return el;
-      }
-    }
-    for (j = 0; j < candidates.length; j++) {
-      el = candidates[j];
-      var txt = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-      if (useContains && txt.indexOf(wantLower) >= 0) {
-        return el;
-      }
-      if (!useContains && txt === wantLower) {
-        return el;
-      }
-    }
-    return null;
-  }
-
-  function fuzzyFindInShadowHosts(selector) {
-    if (!document.body || !document.body.querySelectorAll) {
-      return null;
-    }
-    var hosts = document.body.querySelectorAll("*");
-    var limit = Math.min(hosts.length, 800);
-    var h;
-    var hit;
-    for (h = 0; h < limit; h++) {
-      if (hosts[h].shadowRoot) {
-        hit = fuzzyFindByAriaOrText(selector, hosts[h].shadowRoot);
-        if (hit) {
-          return hit;
-        }
-      }
-    }
-    return null;
-  }
-
-  function resolveDomTarget(selector) {
-    var trimmed = selector && String(selector).trim();
-    if (!trimmed) {
-      return { element: null, error: "Missing selector" };
-    }
-    try {
-      var el = document.querySelector(trimmed);
-      if (el) {
-        return { element: el };
-      }
-    } catch (err) {
-      return { element: null, error: "Invalid selector: " + trimmed };
-    }
-    el = querySelectorInOpenShadowRoots(trimmed, document);
-    if (el) {
-      return { element: el };
-    }
-    el = fuzzyFindByAriaOrText(trimmed, document);
-    if (el) {
-      return { element: el };
-    }
-    el = fuzzyFindInShadowHosts(trimmed);
-    if (el) {
-      return { element: el };
-    }
-    return {
-      element: null,
-      error: "Element not found: " + trimmed
-    };
-  }
-
-  function waitForDomTarget(selector, maxWaitMs) {
-    var deadline = Date.now() + (typeof maxWaitMs === "number" ? maxWaitMs : 3500);
-    var interval = 45;
     return new Promise(function (resolve) {
-      function tryOnce() {
-        var found = resolveDomTarget(selector);
-        if (found.element) {
-          resolve(found);
+      var lastMutation = Date.now();
+      var observer = new MutationObserver(function () { lastMutation = Date.now(); });
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true
+      });
+      function tick() {
+        var now = Date.now();
+        if (now - lastMutation >= idleTarget || now >= deadline) {
+          observer.disconnect();
+          resolve();
           return;
         }
-        if (Date.now() >= deadline) {
-          resolve(found);
-          return;
-        }
-        setTimeout(tryOnce, interval);
+        setTimeout(tick, 50);
       }
-      tryOnce();
+      setTimeout(tick, idleTarget);
     });
   }
 
-  function activateClick(element) {
-    if (!element || typeof element.scrollIntoView === "function") {
-      try {
-        element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      } catch (e) {
-        try {
-          element.scrollIntoView(true);
-        } catch (e2) {}
-      }
+  /**
+   * Lazily load html2canvas from a CDN. Resolves once `window.html2canvas` is available.
+   * Only fetched when snapshot mode is `image`; text mode never pays this cost.
+   */
+  var html2canvasLoadPromise = null;
+  function loadHtml2Canvas() {
+    if (typeof window === "undefined") {
+      return Promise.reject(new Error("html2canvas requires a browser environment"));
     }
-    try {
-      element.click();
-      return;
-    } catch (e1) {}
-    try {
-      element.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true, view: typeof window !== "undefined" ? window : undefined })
-      );
-    } catch (e2) {}
+    if (window.html2canvas) {
+      return Promise.resolve(window.html2canvas);
+    }
+    if (html2canvasLoadPromise) {
+      return html2canvasLoadPromise;
+    }
+    html2canvasLoadPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+      s.async = true;
+      s.onload = function () {
+        if (window.html2canvas) resolve(window.html2canvas);
+        else reject(new Error("html2canvas loaded but not on window"));
+      };
+      s.onerror = function () {
+        html2canvasLoadPromise = null;
+        reject(new Error("Failed to load html2canvas from CDN"));
+      };
+      document.head.appendChild(s);
+    });
+    return html2canvasLoadPromise;
+  }
+
+  /**
+   * Walk the DOM and collect semantic-only labels (alt, aria-label, title, placeholder)
+   * from elements whose visible text is missing or shorter than the label. Used to surface
+   * names that live in image alt attributes, icon buttons with aria-label, etc., which
+   * `body.innerText` does not include.
+   */
+  function collectSemanticLabels(maxItems) {
+    var cap = typeof maxItems === "number" ? maxItems : 200;
+    var lines = [];
+    if (!document.body || !document.body.querySelectorAll) {
+      return lines;
+    }
+    var nodes = document.body.querySelectorAll("img[alt], [aria-label], [title], input[placeholder], textarea[placeholder]");
+    var seen = Object.create(null);
+    for (var i = 0; i < nodes.length && lines.length < cap; i++) {
+      var el = nodes[i];
+      var visible = (el.innerText || el.textContent || "").trim();
+      var alt = el.tagName === "IMG" ? (el.getAttribute("alt") || "").trim() : "";
+      var aria = (el.getAttribute && el.getAttribute("aria-label") || "").trim();
+      var title = (el.getAttribute && el.getAttribute("title") || "").trim();
+      var ph = (el.tagName === "INPUT" || el.tagName === "TEXTAREA") ? (el.getAttribute("placeholder") || "").trim() : "";
+      var label = aria || alt || title || ph;
+      if (!label) continue;
+      // Skip when the visible text already covers the label.
+      if (visible && visible.toLowerCase().indexOf(label.toLowerCase()) !== -1) continue;
+      var kind = alt ? "image" : ph ? "input placeholder" : el.tagName === "BUTTON" || el.getAttribute("role") === "button" ? "button" : el.tagName === "A" ? "link" : "label";
+      var line = "[" + kind + ': "' + label + '"]';
+      if (seen[line]) continue;
+      seen[line] = true;
+      lines.push(line);
+    }
+    return lines;
   }
 
   function isProbablyVisible(el) {
@@ -402,107 +281,164 @@
     };
   }
 
-  function builtInTools(config) {
+  function navigationTargetFromArgs(args) {
+    args = args || {};
+    if (args.path && String(args.path).trim()) {
+      var path = String(args.path).trim();
+      return {
+        target: path,
+        path: path,
+        url: null,
+        external: false
+      };
+    }
+    if (!args.url || !String(args.url).trim()) {
+      return null;
+    }
+    var rawUrl = String(args.url).trim();
+    try {
+      var base = typeof window !== "undefined" && window.location ? window.location.origin : undefined;
+      var parsed = new URL(rawUrl, base);
+      if (typeof window !== "undefined" && window.location && parsed.origin === window.location.origin) {
+        var localPath = parsed.pathname + parsed.search + parsed.hash;
+        return {
+          target: localPath,
+          path: localPath,
+          url: rawUrl,
+          external: false
+        };
+      }
+    } catch (error) {}
     return {
-      "dom.query": function (args) {
-        var selector = args && args.selector ? args.selector : "";
-        var nodes;
-        try {
-          nodes = Array.prototype.slice.call(document.querySelectorAll(selector));
-        } catch (error) {
-          return softToolFailure("dom.query", args, "Invalid selector: " + selector);
+      target: rawUrl,
+      path: null,
+      url: rawUrl,
+      external: true
+    };
+  }
+
+  function isAlreadyOnRoute(path) {
+    if (!path || typeof window === "undefined" || !window.location) {
+      return false;
+    }
+    var current = window.location.pathname + window.location.search + window.location.hash;
+    return current === path || (path.indexOf("?") === -1 && path.indexOf("#") === -1 && window.location.pathname === path);
+  }
+
+  function configuredNavigateHandler(config) {
+    if (!config) {
+      return null;
+    }
+    if (typeof config.navigate === "function") {
+      return { fn: config.navigate, context: config, source: "navigate" };
+    }
+    if (typeof config.router === "function") {
+      return { fn: config.router, context: config, source: "router" };
+    }
+    if (config.router && typeof config.router === "object") {
+      var preferred = typeof config.routerMethod === "string" ? config.routerMethod : null;
+      var methods = preferred ? [preferred, "push", "navigate", "replace"] : ["push", "navigate", "replace"];
+      for (var i = 0; i < methods.length; i++) {
+        var method = methods[i];
+        if (typeof config.router[method] === "function") {
+          return { fn: config.router[method], context: config.router, source: "router." + method };
         }
+      }
+    }
+    return null;
+  }
+
+  function runConfiguredNavigation(config, target, args) {
+    var handler = configuredNavigateHandler(config);
+    if (!handler) {
+      return null;
+    }
+    try {
+      return Promise.resolve(handler.fn.call(handler.context, target.target, {
+        path: target.path,
+        url: target.url,
+        external: target.external,
+        arguments: args || {}
+      })).then(function () {
         return {
           success: true,
           structuredOutput: JSON.stringify({
-            selector: selector,
-            count: nodes.length,
-            matches: nodes.map(function (node) {
-              return {
-                text: (node.innerText || "").slice(0, 200),
-                tagName: node.tagName
-              };
-            })
+            path: target.path,
+            url: target.url,
+            routedBy: handler.source
           }),
-          textSummary: "Matched " + nodes.length + " nodes"
+          textSummary: "Navigated to " + target.target
         };
-      },
-      "dom.click": function (args) {
-        var sel = args && args.selector ? args.selector : "";
-        return waitForDomTarget(sel, 4000).then(function (found) {
-          if (!found.element) {
-            return softToolFailure("dom.click", args, found.error);
-          }
-          activateClick(found.element);
-          return {
-            success: true,
-            structuredOutput: JSON.stringify({ selector: args.selector }),
-            textSummary: "Clicked " + args.selector
-          };
+      }, function (error) {
+        return softToolFailure("app.navigate", args, "Client router navigation failed: " + (error && error.message ? error.message : String(error)), {
+          path: target.path,
+          url: target.url,
+          routedBy: handler.source
         });
-      },
-      "dom.type": function (args) {
-        var sel = args && args.selector ? args.selector : "";
-        return waitForDomTarget(sel, 4000).then(function (found) {
-          if (!found.element) {
-            return softToolFailure("dom.type", args, found.error);
-          }
-          var element = found.element;
-          try {
-            element.focus();
-          } catch (e) {}
-          element.value = (args && args.value) || "";
-          element.dispatchEvent(new Event("input", { bubbles: true }));
-          element.dispatchEvent(new Event("change", { bubbles: true }));
-          return {
-            success: true,
-            structuredOutput: JSON.stringify({ selector: args.selector, value: (args && args.value) || "" }),
-            textSummary: "Typed into " + args.selector
-          };
-        });
-      },
-      "dom.read": function (args) {
-        var sel = args && args.selector ? args.selector : "";
-        return waitForDomTarget(sel, 4000).then(function (found) {
-          if (!found.element) {
-            return softToolFailure("dom.read", args, found.error);
-          }
-          var element = found.element;
-          return {
-            success: true,
-            structuredOutput: JSON.stringify({
-              selector: args.selector,
-              text: element.innerText || "",
-              value: element.value || null
-            }),
-            textSummary: "Read " + args.selector
-          };
-        });
+      });
+    } catch (error) {
+      return Promise.resolve(softToolFailure("app.navigate", args, "Client router navigation failed: " + (error && error.message ? error.message : String(error)), {
+        path: target.path,
+        url: target.url,
+        routedBy: handler.source
+      }));
+    }
+  }
+
+  function builtInTools(config) {
+    return {
+      "path.find": function () {
+        var loc = typeof location !== "undefined" ? location : {};
+        return {
+          success: true,
+          structuredOutput: JSON.stringify({
+            path: loc.pathname || "",
+            url: loc.href || "",
+            title: (typeof document !== "undefined" && document.title) || "",
+            search: loc.search || "",
+            hash: loc.hash || ""
+          }),
+          textSummary: "Current path: " + (loc.pathname || "/")
+        };
       },
       "app.navigate": function (args) {
         debugLog(config, "app.navigate invoked", args);
-        var targetPath = args.path || (args.url ? new URL(args.url).pathname : null);
-        if (targetPath) {
-          if (window.location.pathname === targetPath) {
-            debugLog(config, "already on path", targetPath);
+        var target = navigationTargetFromArgs(args);
+        if (!target) {
+          return {
+            success: false,
+            structuredOutput: null,
+            textSummary: "No path or URL provided"
+          };
+        }
+        if (target.path) {
+          if (isAlreadyOnRoute(target.path)) {
+            debugLog(config, "already on path", target.path);
             return {
               success: true,
-              structuredOutput: JSON.stringify({ path: targetPath, alreadyOnPage: true }),
-              textSummary: "Already on " + targetPath
+              structuredOutput: JSON.stringify({ path: target.path, alreadyOnPage: true }),
+              textSummary: "Already on " + target.path
             };
           }
-          history.pushState({}, "", targetPath);
+        }
+        var configuredNavigation = runConfiguredNavigation(config, target, args);
+        if (configuredNavigation) {
+          return configuredNavigation;
+        }
+        if (target.path) {
+          history.pushState({}, "", target.path);
           window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
           return {
             success: true,
-            structuredOutput: JSON.stringify({ path: targetPath }),
-            textSummary: "Navigated to " + targetPath
+            structuredOutput: JSON.stringify({ path: target.path }),
+            textSummary: "Navigated to " + target.path
           };
-        } else if (args.url) {
-          window.location.assign(args.url);
+        }
+        if (target.url) {
+          window.location.assign(target.url);
           return {
             success: true,
-            structuredOutput: JSON.stringify({ url: args.url }),
+            structuredOutput: JSON.stringify({ url: target.url }),
             textSummary: "Navigation requested"
           };
         }
@@ -513,14 +449,62 @@
         };
       },
       "page.screenshot": function () {
-        return {
-          success: true,
-          structuredOutput: JSON.stringify({
-            title: document.title,
-            html: document.documentElement.outerHTML.slice(0, 5000)
-          }),
-          textSummary: "Captured DOM snapshot"
-        };
+        return waitForDomStable(500, 4000).then(function () {
+          var loc = typeof location !== "undefined" ? location : {};
+          if (config.snapshotMode === "image") {
+            return loadHtml2Canvas().then(function (html2canvas) {
+              return html2canvas(document.body, {
+                logging: false,
+                useCORS: true,
+                backgroundColor: null,
+                scale: 1
+              });
+            }).then(function (canvas) {
+              var dataUrl = canvas.toDataURL("image/png");
+              var kb = Math.round(dataUrl.length / 1024);
+              return {
+                success: true,
+                structuredOutput: JSON.stringify({
+                  mode: "image",
+                  path: loc.pathname || "",
+                  url: loc.href || "",
+                  title: document.title || "",
+                  imageBase64: dataUrl
+                }),
+                textSummary: "Page snapshot of " + (loc.pathname || "/") + " (image, " + kb + "KB)"
+              };
+            }).catch(function (error) {
+              return softToolFailure("page.screenshot", {}, "Image capture failed: " + (error && error.message ? error.message : String(error)));
+            });
+          }
+          // Text mode (default).
+          var rawText = (document.body && document.body.innerText) || "";
+          // Collapse runs of blank lines / spaces so the cap covers more real content.
+          var visibleText = rawText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+          var labels = collectSemanticLabels(200);
+          if (labels.length > 0) {
+            visibleText = visibleText + "\n\n--- Labels (alt / aria-label / placeholder) ---\n" + labels.join("\n");
+          }
+          var maxChars = 12000;
+          var truncated = false;
+          if (visibleText.length > maxChars) {
+            visibleText = visibleText.slice(0, maxChars);
+            truncated = true;
+          }
+          return {
+            success: true,
+            structuredOutput: JSON.stringify({
+              mode: "text",
+              path: loc.pathname || "",
+              url: loc.href || "",
+              title: document.title || "",
+              visibleText: visibleText,
+              labelCount: labels.length,
+              truncated: truncated
+            }),
+            textSummary: "Page snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
+          };
+        });
       }
     };
   }
@@ -529,6 +513,23 @@
     if (!config || !config.baseUrl || !config.assistantId) {
       throw new Error("baseUrl and assistantId are required");
     }
+
+    // Default until the runtime config endpoint replies. Tool handlers close over this
+    // config object, so updating config.snapshotMode in place propagates to page.screenshot.
+    if (config.snapshotMode !== "image" && config.snapshotMode !== "text") {
+      config.snapshotMode = "text";
+    }
+    fetch(config.baseUrl + "/v1/widget/config", { method: "GET" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (data && (data.snapshotMode === "text" || data.snapshotMode === "image")) {
+          config.snapshotMode = data.snapshotMode;
+          debugLog(config, "widget snapshotMode =", data.snapshotMode);
+        }
+      })
+      .catch(function (error) {
+        debugLog(config, "failed to load /v1/widget/config", error);
+      });
 
     var emitter = createEmitter();
     var tools = builtInTools(config);
@@ -571,6 +572,7 @@
 
     var currentConversationId = readStoredConversationId();
     var activeRunEventSource = null;
+    var activeRunId = null;
 
     // Persist the active runId so we can reconnect after SPA navigation
     var runStorageKey = "actbrow:run:" + config.assistantId;
@@ -793,6 +795,7 @@
       }
       var source = new EventSource(eventsUrl);
       activeRunEventSource = source;
+      activeRunId = runId;
       writeStoredRunId(runId);
       debugLog(config, "opening run stream", runId);
       source.onopen = function () {
@@ -802,16 +805,19 @@
         if (activeRunEventSource === source) {
           activeRunEventSource = null;
         }
+        if (activeRunId === runId) {
+          activeRunId = null;
+        }
         clearStoredRunId();
         try {
           source.close();
         } catch (e) {}
       }
-      ["run.started", "tool.call.requested", "tool.call.completed", "assistant.message.completed", "run.failed"]
+      ["run.started", "tool.call.requested", "tool.call.completed", "assistant.message.completed", "run.failed", "run.cancelled"]
         .forEach(function (eventName) {
           source.addEventListener(eventName, function (event) {
             handleRunEvent(runId, event);
-            if (eventName === "assistant.message.completed" || eventName === "run.failed") {
+            if (eventName === "assistant.message.completed" || eventName === "run.failed" || eventName === "run.cancelled") {
               endStream();
             }
           });
@@ -965,6 +971,21 @@
             streamRun(storedRunId);
           }
         });
+      },
+      getActiveRunId: function () {
+        return activeRunId || readStoredRunId();
+      },
+      cancelRun: function () {
+        var id = activeRunId || readStoredRunId();
+        if (!id) {
+          return Promise.resolve(null);
+        }
+        debugLog(config, "cancelling run", id);
+        return request("/v1/runs/" + id + "/cancel", { method: "POST" })
+          .catch(function (error) {
+            debugLog(config, "cancel run failed", id, error);
+            return null;
+          });
       },
       on: emitter.on
     };
@@ -1183,14 +1204,16 @@
     var input = document.createElement("input");
     input.className = "actbrow-widget-input";
     input.type = "text";
-    input.placeholder = labels.placeholder || "Ask me to navigate, click, read, or help";
+    input.placeholder = labels.placeholder || "Ask me to navigate or help with what's on this page";
     input.setAttribute("aria-label", "Message input");
 
     var send = document.createElement("button");
     send.className = "actbrow-widget-send";
     send.type = "submit";
     send.setAttribute("aria-label", "Send message");
-    send.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg><span>' + escapeHtml(labels.send || "Send") + '</span>';
+    var sendButtonSendHtml = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg><span>' + escapeHtml(labels.send || "Send") + '</span>';
+    var sendButtonStopHtml = '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>' + escapeHtml(labels.stop || "Stop") + '</span>';
+    send.innerHTML = sendButtonSendHtml;
 
     form.appendChild(input);
     form.appendChild(send);
@@ -1211,7 +1234,10 @@
       baseUrl: config.baseUrl,
       assistantId: config.assistantId,
       apiKey: config.apiKey,
-      debug: !!config.debug
+      debug: !!config.debug,
+      navigate: config.navigate,
+      router: config.router,
+      routerMethod: config.routerMethod
     });
     global.ActbrowWidgetClient = client;
     // Reconnect any in-progress run from a previous page load or hard refresh
@@ -1292,8 +1318,18 @@
     function setSendingState(nextValue) {
       isSending = nextValue;
       input.disabled = nextValue;
-      send.disabled = nextValue;
+      // Keep the send button enabled while sending — it morphs into a Stop button.
+      send.disabled = false;
       clearHistoryButton.disabled = nextValue;
+      if (nextValue) {
+        send.innerHTML = sendButtonStopHtml;
+        send.setAttribute("aria-label", "Stop");
+        send.title = "Stop";
+      } else {
+        send.innerHTML = sendButtonSendHtml;
+        send.setAttribute("aria-label", "Send message");
+        send.title = "";
+      }
     }
 
     function scrollToBottom() {
@@ -1646,10 +1682,21 @@
       setSendingState(false);
     });
 
+    client.on("run.cancelled", function () {
+      removeThinkingRow();
+      appendMessage("assistant", labels.cancelledMessage || "Stopped.");
+      setStatus("");
+      setSendingState(false);
+    });
+
     form.addEventListener("submit", function (submitEvent) {
       submitEvent.preventDefault();
+      if (isSending) {
+        client.cancelRun();
+        return;
+      }
       var text = input.value.trim();
-      if (!text || isSending) {
+      if (!text) {
         return;
       }
       submitPrompt(text);

@@ -9,7 +9,6 @@ public record AssistantResponse(
 	String systemPrompt,
 	String model,
 	boolean usePredefinedFlows,
-	String apiKey,
 	String userId,
 	Instant createdAt
 ) {

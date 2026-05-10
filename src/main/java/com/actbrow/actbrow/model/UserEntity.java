@@ -28,6 +28,9 @@ public class UserEntity {
 	@Column(name = "google_id", nullable = false, unique = true)
 	private String googleId;
 
+	@Column(name = "api_key", nullable = false, unique = true)
+	private String apiKey;
+
 	@Column(nullable = false)
 	private Instant createdAt;
 
@@ -79,6 +82,14 @@ public class UserEntity {
 
 	public void setGoogleId(String googleId) {
 		this.googleId = googleId;
+	}
+
+	public String getApiKey() {
+		return apiKey;
+	}
+
+	public void setApiKey(String apiKey) {
+		this.apiKey = apiKey;
 	}
 
 	public Instant getCreatedAt() {

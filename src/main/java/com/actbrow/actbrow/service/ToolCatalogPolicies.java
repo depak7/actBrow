@@ -24,10 +24,7 @@ public final class ToolCatalogPolicies {
 			return false;
 		}
 		if (type == ToolType.CLIENT) {
-			return executorRef.startsWith("dom.") || executorRef.startsWith("page.") || "app.navigate".equals(executorRef);
-		}
-		if (type == ToolType.SERVER_HTTP) {
-			return executorRef.startsWith("api.");
+			return isClientSideCatalogExecutor(executorRef);
 		}
 		return false;
 	}
@@ -38,16 +35,6 @@ public final class ToolCatalogPolicies {
 		}
 		if (tool.type() == ToolType.BUILD_IN || tool.type() == ToolType.CLIENT) {
 			return isClientSideCatalogExecutor(tool.executorRef());
-		}
-		return false;
-	}
-
-	public static boolean isHttpBuiltInAttachmentCandidate(ToolResponse tool) {
-		if (tool.executorRef() == null || !tool.key().equals(tool.executorRef())) {
-			return false;
-		}
-		if (tool.type() == ToolType.BUILD_IN || tool.type() == ToolType.SERVER_HTTP) {
-			return tool.executorRef().startsWith("api.");
 		}
 		return false;
 	}
@@ -63,16 +50,12 @@ public final class ToolCatalogPolicies {
 	}
 
 	public static boolean executesAsHttpTool(ToolType type, String executorRef) {
-		if (type == ToolType.SERVER_HTTP) {
-			return true;
-		}
-		if (type == ToolType.BUILD_IN) {
-			return executorRef != null && executorRef.startsWith("api.");
-		}
-		return false;
+		return type == ToolType.SERVER_HTTP;
 	}
 
 	private static boolean isClientSideCatalogExecutor(String executorRef) {
-		return executorRef.startsWith("dom.") || executorRef.startsWith("page.") || "app.navigate".equals(executorRef);
+		return "app.navigate".equals(executorRef)
+			|| "path.find".equals(executorRef)
+			|| "page.screenshot".equals(executorRef);
 	}
 }

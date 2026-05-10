@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
 
@@ -52,14 +53,17 @@ public class RunService {
 	private final NavigationFlowService navigationFlowService;
 	private final ActbrowProperties properties;
 	private final ObjectMapper objectMapper;
+	private final String defaultChatModel;
 	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
 	private final Set<String> cancelledRuns = ConcurrentHashMap.newKeySet();
+	private final Map<String, Set<String>> seenToolCalls = new ConcurrentHashMap<>();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
 		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
 		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
-		NavigationFlowService navigationFlowService, ActbrowProperties properties, ObjectMapper objectMapper) {
+		NavigationFlowService navigationFlowService, ActbrowProperties properties, ObjectMapper objectMapper,
+		@Value("${spring.ai.openai.chat.options.model:deepseek-chat}") String defaultChatModel) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
 		this.conversationService = conversationService;
@@ -73,6 +77,7 @@ public class RunService {
 		this.navigationFlowService = navigationFlowService;
 		this.properties = properties;
 		this.objectMapper = objectMapper;
+		this.defaultChatModel = defaultChatModel;
 	}
 
 	public RunResponse startRun(String conversationId, TurnRequest request) {
@@ -180,7 +185,11 @@ public class RunService {
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
 
-				ModelDecision decision = modelProvider.decideNextStep(null, systemPrompt,
+				String chatModel = assistant.getModel();
+				if (chatModel == null || chatModel.isBlank()) {
+					chatModel = defaultChatModel;
+				}
+				ModelDecision decision = modelProvider.decideNextStep(chatModel, systemPrompt,
 					conversationService.listMessages(run.getConversationId()), tools, stepIndex);
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 
@@ -268,6 +277,7 @@ public class RunService {
 		finally {
 			startedRuns.remove(runId);
 			cancelledRuns.remove(runId);
+			seenToolCalls.remove(runId);
 		}
 	}
 
@@ -282,6 +292,14 @@ public class RunService {
 	private ToolExecutionResult executeTool(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
 		Map<String, Object> executionArguments)
 		throws Exception {
+		String signature = toolCallSignature(tool, executionArguments);
+		Set<String> seen = seenToolCalls.computeIfAbsent(run.getId(), k -> ConcurrentHashMap.newKeySet());
+		if (!seen.add(signature)) {
+			String message = "You already called " + tool.key()
+				+ " with these exact arguments earlier in this run. The result will not change. "
+				+ "Stop calling tools and produce a final answer for the user instead.";
+			return new ToolExecutionResult(false, null, message, message);
+		}
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
 			runRepository.save(run);
@@ -300,7 +318,9 @@ public class RunService {
 				pendingClientToolStore.cancel(toolCall.toolCallId());
 				run.setStatus(RunStatus.IN_PROGRESS);
 				runRepository.save(run);
-				String message = "Client tool timed out after " + properties.toolTimeout().toMillis() + "ms";
+				String message = "Client tool '" + tool.key() + "' timed out after "
+					+ properties.toolTimeout().toMillis() + "ms. You did NOT receive any data from it. "
+					+ "Do not describe page content. Tell the user this tool could not complete and stop.";
 				return new ToolExecutionResult(false, null, message, message);
 			}
 		}
@@ -318,6 +338,16 @@ public class RunService {
 			return ToolType.SERVER_HTTP.name();
 		}
 		return tool.type().name();
+	}
+
+	private String toolCallSignature(ToolDescriptor tool, Map<String, Object> arguments) {
+		Map<String, Object> sortedArgs = arguments == null ? Map.of() : new java.util.TreeMap<>(arguments);
+		try {
+			return tool.key() + "|" + objectMapper.writeValueAsString(sortedArgs);
+		}
+		catch (JsonProcessingException e) {
+			return tool.key() + "|" + sortedArgs.toString();
+		}
 	}
 
 	private String resolveExecutorKey(ToolDescriptor tool) {
@@ -414,8 +444,7 @@ public class RunService {
 				json = json.substring(0, 48_000) + "\n...(PAGE_CONTEXT truncated)";
 			}
 			return content.stripTrailing() + UserMessageDisplay.PAGE_CONTEXT_APPENDIX_START
-				+ "Prefer the listed \"selector\" values for dom.click, dom.type, dom.read. "
-				+ "If you need a control not listed, call dom.query (or page.screenshot) first—do not invent selectors.) ---\n"
+				+ "Observation only — describes where the user currently is. Do not act on it directly; use the attached tools.) ---\n"
 				+ json;
 		}
 		catch (JsonProcessingException exception) {
@@ -430,7 +459,27 @@ public class RunService {
 			prompt.append(assistant.getSystemPrompt()).append("\n\n");
 		}
 
-		prompt.append("BROWSER AUTOMATION: You do not see the live page. User messages may include a PAGE_CONTEXT JSON block from the host app listing interactive elements and suggested CSS selectors. Treat that block as authoritative for that turn unless tool results show the DOM changed. Do not guess selectors; use PAGE_CONTEXT or call dom.query / page.screenshot first, then act with dom.click, dom.type, or app.navigate.\n\n");
+		prompt.append("OPERATING MODE: You are acting on behalf of the user inside a host web app. You have a small set of built-in observation tools plus a generic navigation primitive. You have NO general-purpose write or DOM-manipulation primitives.\n")
+			.append("\n")
+			.append("Built-in tools (always available):\n")
+			.append("  - path.find        Returns the user's current path, full URL, page title, query, and hash. Call this when you need to know where the user is.\n")
+			.append("  - page.screenshot  Returns a text snapshot of the current page (title + truncated DOM). Call this only to answer questions about what the user is currently looking at.\n")
+			.append("  - app.navigate     Moves the user to a path inside the host app (path or url argument). Use this to take the user somewhere; never use it as a way to read.\n")
+			.append("\n")
+			.append("Operation tools (writes, side-effects beyond navigation) appear ONLY in the function schema for this turn and ONLY if the operator attached them. Do not try to synthesize an operation by chaining observation/navigation calls.\n")
+			.append("\n")
+			.append("HARD RULES — violating these is the worst failure mode:\n")
+			.append("  1. Never call a tool that is not in the function schema for this turn. Never invent tool names, paths, URLs, or arguments that aren't supported by an attached tool's schema and defaults.\n")
+			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
+			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in the most recent page.screenshot.visibleText OR in PAGE_CONTEXT. If a detail is not literally there, do NOT include it. Do not infer, paraphrase into specifics, or fill in plausible-looking values. If the snapshot only shows the navigation bar, only describe the navigation bar — say the page body was empty/not captured rather than inventing content.\n")
+			.append("  3. If a tool fails or times out, tell the user honestly: which tool, what failed, and that you can't see the page. Do not improvise a description. Do not retry the same tool with the same arguments.\n")
+			.append("  4. Call each observation tool (path.find, page.screenshot) AT MOST ONCE per user turn. After observation, produce a final answer.\n")
+			.append("  5. NEVER call the same tool twice with the same arguments. The result will not change.\n")
+			.append("  6. If two observation calls have not given you what you need, stop calling tools. Give a final answer that says what you tried.\n")
+			.append("  7. If no action tool can fulfill the user's request, do NOT improvise. Give a final answer that politely tells the user to do it themselves. When you have real observation, reference what you saw (the current path, a section name, a button label) so the user knows where to act. When you do NOT have observation, do not invent one — just say so.\n")
+			.append("  8. If the user's request is unclear, ask one focused clarifying question instead of guessing.\n")
+			.append("\n")
+			.append("In every turn, the cheapest correct outcome is a final answer. Tool calls are only justified when they unlock a final answer you could not otherwise give.\n\n");
 
 		if (assistant.isUsePredefinedFlows()) {
 			try {
@@ -455,7 +504,7 @@ public class RunService {
 						prompt.append("\n");
 					}
 
-					prompt.append("INSTRUCTION: When user request matches a flow trigger, execute each step sequentially using the appropriate tools (app.navigate, dom.click, dom.type, etc.). Do not skip steps.\n\n");
+					prompt.append("INSTRUCTION: When the user's request matches a flow trigger, call app.navigate for each step's target in order. Do not skip steps.\n\n");
 				}
 			}
 			catch (Exception e) {

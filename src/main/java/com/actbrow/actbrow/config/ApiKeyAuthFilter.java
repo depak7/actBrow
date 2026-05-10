@@ -13,7 +13,7 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 
-import com.actbrow.actbrow.service.AssistantService;
+import com.actbrow.actbrow.repository.UserRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -25,11 +25,11 @@ public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final Logger log = LoggerFactory.getLogger(ApiKeyAuthFilter.class);
 
-	private final AssistantService assistantService;
+	private final UserRepository userRepository;
 	private final ObjectMapper objectMapper;
 
-	public ApiKeyAuthFilter(AssistantService assistantService, ObjectMapper objectMapper) {
-		this.assistantService = assistantService;
+	public ApiKeyAuthFilter(UserRepository userRepository, ObjectMapper objectMapper) {
+		this.userRepository = userRepository;
 		this.objectMapper = objectMapper;
 	}
 
@@ -56,13 +56,12 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 
 		try {
-			var assistant = assistantService.findByApiKey(apiKey);
-			// Strip any caller-supplied assistant headers before adding the resolved id
-			// to prevent assistant identity spoofing.
+			var user = userRepository.findByApiKey(apiKey)
+				.orElseThrow(() -> new IllegalArgumentException("Invalid API key"));
 			ServerWebExchange authenticatedExchange = exchange.mutate()
 				.request(exchange.getRequest().mutate()
-					.headers(h -> h.remove("X-Assistant-Id"))
-					.header("X-Assistant-Id", assistant.getId())
+					.headers(h -> h.remove("X-User-Id"))
+					.header("X-User-Id", user.getId())
 					.build())
 				.build();
 			return chain.filter(authenticatedExchange);
@@ -89,6 +88,9 @@ public class ApiKeyAuthFilter implements WebFilter {
 			return true;
 		}
 		if ("/actbrow-sdk.js".equals(path) || "/actbrow-widget.js".equals(path)) {
+			return true;
+		}
+		if ("GET".equalsIgnoreCase(method) && "/v1/widget/config".equals(path)) {
 			return true;
 		}
 		return segmentsMatch(path, "/auth");

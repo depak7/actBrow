@@ -37,7 +37,10 @@
       assistantId: assistantId,
       baseUrl: baseUrl || (global.location ? global.location.origin : ""),
       apiKey: apiKey,
-      debug: debug
+      debug: debug,
+      navigate: config.navigate,
+      router: config.router,
+      routerMethod: config.routerMethod
     });
   }
 

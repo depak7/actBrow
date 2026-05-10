@@ -54,7 +54,8 @@ public class ToolService {
 	}
 
 	public void attachBuiltInClientTools(String assistantId) {
-		for (ToolResponse tool : list()) {
+		for (ToolDefinitionEntity toolEntity : toolRepository.findAll()) {
+			ToolResponse tool = toResponse(toolEntity);
 			if (!ToolCatalogPolicies.isBuiltInClientAttachmentCandidate(tool)) {
 				continue;
 			}
@@ -62,29 +63,17 @@ public class ToolService {
 				existing -> {
 				},
 				() -> {
-					AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
-					entity.setAssistantId(assistantId);
-					entity.setToolId(tool.id());
-					bindingRepository.save(entity);
+					AssistantToolBindingEntity binding = new AssistantToolBindingEntity();
+					binding.setAssistantId(assistantId);
+					binding.setToolId(tool.id());
+					bindingRepository.save(binding);
 				});
 		}
 	}
 
-	public void attachHttpTools(String assistantId) {
-		for (ToolResponse tool : list()) {
-			if (!ToolCatalogPolicies.isHttpBuiltInAttachmentCandidate(tool)) {
-				continue;
-			}
-			bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
-				existing -> {
-				},
-				() -> {
-					AssistantToolBindingEntity entity = new AssistantToolBindingEntity();
-					entity.setAssistantId(assistantId);
-					entity.setToolId(tool.id());
-					bindingRepository.save(entity);
-				});
-		}
+	@Transactional
+	public void deleteByKeyIfPresent(String key) {
+		toolRepository.findByKey(key).ifPresent(entity -> delete(entity.getId()));
 	}
 
 	public ToolResponse update(String id, ToolRequest request) {
@@ -142,7 +131,11 @@ public class ToolService {
 	}
 
 	public List<ToolResponse> list() {
-		return toolRepository.findAll().stream().map(this::toResponse).toList();
+		return toolRepository.findAll().stream()
+			.filter(entity -> !ToolCatalogPolicies.isPlatformCatalogTool(entity.getType(), entity.getKey(),
+				entity.getExecutorRef()))
+			.map(this::toResponse)
+			.toList();
 	}
 
 	public List<ToolResponse> listAssistantTools(String assistantId) {

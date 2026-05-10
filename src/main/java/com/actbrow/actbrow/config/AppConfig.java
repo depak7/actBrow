@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Configuration
 @EnableConfigurationProperties({
 	ActbrowProperties.class,
+	ActbrowSnapshotProperties.class,
 	GoogleOAuthProperties.class,
 	CorsProperties.class
 })

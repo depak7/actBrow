@@ -2,6 +2,8 @@ package com.actbrow.actbrow.api;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.security.SecureRandom;
+import java.util.Base64;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -20,6 +22,7 @@ public class AuthController {
 
 	private final UserRepository userRepository;
 	private final GoogleIdTokenVerifier googleIdTokenVerifier;
+	private final SecureRandom secureRandom = new SecureRandom();
 
 	public AuthController(UserRepository userRepository, GoogleIdTokenVerifier googleIdTokenVerifier) {
 		this.userRepository = userRepository;
@@ -80,8 +83,13 @@ public class AuthController {
 				newUser.setEmail(resolvedEmail);
 				newUser.setFullName(resolvedFullName);
 				newUser.setProfilePictureUrl(resolvedPictureUrl);
+				newUser.setApiKey(generateApiKey());
 				return userRepository.save(newUser);
 			});
+		if (user.getApiKey() == null || user.getApiKey().isBlank()) {
+			user.setApiKey(generateApiKey());
+			user = userRepository.save(user);
+		}
 
 		Map<String, Object> userJson = new LinkedHashMap<>();
 		userJson.put("id", user.getId());
@@ -90,7 +98,8 @@ public class AuthController {
 		userJson.put("pictureUrl", user.getProfilePictureUrl());
 		return ResponseEntity.ok(Map.of(
 			"success", true,
-			"user", userJson
+			"user", userJson,
+			"apiKey", user.getApiKey()
 		));
 	}
 
@@ -99,5 +108,11 @@ public class AuthController {
 		// Dashboard auth is currently unauthenticated. Frontend manages session state via the
 		// userId returned from /auth/google. Wire proper session/JWT before multi-customer deploy.
 		return ResponseEntity.ok(Map.of("authenticated", false));
+	}
+
+	private String generateApiKey() {
+		byte[] bytes = new byte[32];
+		secureRandom.nextBytes(bytes);
+		return "ak_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
 	}
 }
