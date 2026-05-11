@@ -63,7 +63,7 @@ public class RunService {
 		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
 		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
 		NavigationFlowService navigationFlowService, ActbrowProperties properties, ObjectMapper objectMapper,
-		@Value("${spring.ai.openai.chat.options.model:deepseek-chat}") String defaultChatModel) {
+		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
 		this.conversationService = conversationService;

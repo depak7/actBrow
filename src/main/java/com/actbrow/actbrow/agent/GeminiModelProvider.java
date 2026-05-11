@@ -28,15 +28,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Sole {@link ModelProvider} since Phase 1 collapsed actbrow to a single model. Delegates to
- * Spring AI's OpenAI-compatible {@link ChatModel} bean, which is configured against DeepSeek's
- * chat-completions endpoint via {@code spring.ai.openai.*} properties.
+ * Spring AI's OpenAI-compatible {@link ChatModel} bean, which is configured against Gemini's
+ * OpenAI-compatible chat-completions endpoint via {@code spring.ai.openai.*} properties.
  *
  * Spring AI's internal tool execution is disabled — actbrow's {@code RunService} owns the
  * tool-call dispatch loop, so this provider only needs to surface tool-call requests back as
  * {@link ToolCallDecision} for the existing run pipeline to handle.
  */
 @Component
-public class DeepSeekModelProvider implements ModelProvider {
+public class GeminiModelProvider implements ModelProvider {
 
 	private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
 	};
@@ -44,14 +44,14 @@ public class DeepSeekModelProvider implements ModelProvider {
 	private final ChatModel chatModel;
 	private final ObjectMapper objectMapper;
 
-	public DeepSeekModelProvider(ChatModel chatModel, ObjectMapper objectMapper) {
+	public GeminiModelProvider(ChatModel chatModel, ObjectMapper objectMapper) {
 		this.chatModel = chatModel;
 		this.objectMapper = objectMapper;
 	}
 
 	@Override
 	public String providerKey() {
-		return "deepseek";
+		return "gemini";
 	}
 
 	@Override
@@ -79,8 +79,8 @@ public class DeepSeekModelProvider implements ModelProvider {
 
 	/**
 	 * Legacy assistants may have model values like {@code "gemini:gemini-pro"} from the deleted
-	 * RoutingModelProvider. Strip the provider prefix so we pass a clean model name to DeepSeek;
-	 * if DeepSeek doesn't recognize the trailing name it'll surface a clear error from the API.
+	 * RoutingModelProvider. Strip the provider prefix so we pass a clean model name to the API;
+	 * if the API doesn't recognize the trailing name it'll surface a clear error.
 	 */
 	private static String stripProviderPrefix(String model) {
 		if (model == null) {
@@ -196,7 +196,7 @@ public class DeepSeekModelProvider implements ModelProvider {
 		@Override
 		public String call(String toolInput) {
 			throw new IllegalStateException(
-				"DeepSeekModelProvider proxies tool execution to RunService. Spring AI should not call this directly.");
+				"GeminiModelProvider proxies tool execution to RunService. Spring AI should not call this directly.");
 		}
 	}
 
@@ -206,7 +206,7 @@ public class DeepSeekModelProvider implements ModelProvider {
 
 	private ModelDecision parseDecision(ChatResponse response, List<ToolDescriptor> tools) {
 		if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
-			throw new IllegalArgumentException("DeepSeek returned an empty response");
+			throw new IllegalArgumentException("Gemini returned an empty response");
 		}
 		AssistantMessage assistant = response.getResult().getOutput();
 		List<AssistantMessage.ToolCall> springToolCalls = assistant.getToolCalls();
@@ -219,19 +219,19 @@ public class DeepSeekModelProvider implements ModelProvider {
 					.filter(t -> sanitizeToolName(t.key()).equals(requestedName) || t.key().equals(requestedName))
 					.findFirst()
 					.orElseThrow(() -> new IllegalArgumentException(
-						"DeepSeek requested unknown tool: " + requestedName));
+						"Gemini requested unknown tool: " + requestedName));
 				Map<String, Object> arguments = parseArguments(stc.arguments());
 				String callId = (stc.id() != null && !stc.id().isBlank())
 					? stc.id()
-					: "ds-" + UUID.randomUUID();
+					: "gem-" + UUID.randomUUID();
 				calls.add(new ToolCall(callId, tool.id(), tool.key(), arguments));
 			}
-			return new ToolCallDecision("DeepSeek requested " + calls.size() + " tool(s)", calls);
+			return new ToolCallDecision("Gemini requested " + calls.size() + " tool(s)", calls);
 		}
 
 		String text = assistant.getText();
 		if (text == null || text.isBlank()) {
-			throw new IllegalArgumentException("DeepSeek returned neither text nor tool calls");
+			throw new IllegalArgumentException("Gemini returned neither text nor tool calls");
 		}
 		return new FinalResponseDecision(text);
 	}
@@ -244,7 +244,7 @@ public class DeepSeekModelProvider implements ModelProvider {
 			return objectMapper.readValue(argumentsJson, MAP_TYPE);
 		}
 		catch (JsonProcessingException exception) {
-			throw new IllegalArgumentException("DeepSeek returned non-JSON tool arguments: " + argumentsJson, exception);
+			throw new IllegalArgumentException("Gemini returned non-JSON tool arguments: " + argumentsJson, exception);
 		}
 	}
 

@@ -52,7 +52,7 @@ class ApiFlowTests {
 		registry.add("spring.h2.console.enabled", () -> "false");
 		registry.add("spring.ai.openai.api-key", () -> "test-key");
 		registry.add("spring.ai.openai.base-url", () -> GEMINI_SERVER.url("/").toString().replaceAll("/$", ""));
-		registry.add("spring.ai.openai.chat.options.model", () -> "deepseek-chat");
+		registry.add("spring.ai.openai.chat.options.model", () -> "gemini-2.5-flash");
 	}
 
 	@AfterAll

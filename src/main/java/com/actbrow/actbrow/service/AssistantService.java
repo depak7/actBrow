@@ -21,7 +21,7 @@ public class AssistantService {
 	private final String defaultChatModel;
 
 	public AssistantService(AssistantRepository assistantRepository, ToolService toolService,
-		@Value("${spring.ai.openai.chat.options.model:deepseek-chat}") String defaultChatModel) {
+		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
 		this.assistantRepository = assistantRepository;
 		this.toolService = toolService;
 		this.defaultChatModel = defaultChatModel;
