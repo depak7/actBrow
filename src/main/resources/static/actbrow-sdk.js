@@ -118,6 +118,19 @@
    * Only fetched when snapshot mode is `image`; text mode never pays this cost.
    */
   var html2canvasLoadPromise = null;
+  var unsupportedCanvasColorRe = /\b(?:oklab|oklch|lab|lch|color|color-mix)\(/i;
+  var html2CanvasColorProperties = [
+    "color",
+    "backgroundColor",
+    "borderTopColor",
+    "borderRightColor",
+    "borderBottomColor",
+    "borderLeftColor",
+    "outlineColor",
+    "textDecorationColor",
+    "fill",
+    "stroke"
+  ];
   function loadHtml2Canvas() {
     if (typeof window === "undefined") {
       return Promise.reject(new Error("html2canvas requires a browser environment"));
@@ -143,6 +156,113 @@
       document.head.appendChild(s);
     });
     return html2canvasLoadPromise;
+  }
+
+  function hasUnsupportedCanvasColor(value) {
+    return !!value && unsupportedCanvasColorRe.test(value);
+  }
+
+  function sanitizeHtml2CanvasClone(clonedDocument) {
+    var view = clonedDocument.defaultView;
+    if (!view || !clonedDocument.body) return;
+    var nodes = [clonedDocument.documentElement, clonedDocument.body].concat(
+      Array.prototype.slice.call(clonedDocument.body.querySelectorAll("*"))
+    );
+
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!el || !el.style) continue;
+      var computed;
+      try {
+        computed = view.getComputedStyle(el);
+      } catch (e) {
+        continue;
+      }
+
+      for (var j = 0; j < html2CanvasColorProperties.length; j++) {
+        var prop = html2CanvasColorProperties[j];
+        var value = computed[prop];
+        if (!hasUnsupportedCanvasColor(value)) continue;
+        if (prop === "color") {
+          el.style.setProperty(prop, "rgb(17, 24, 39)", "important");
+        } else if (prop === "backgroundColor") {
+          el.style.setProperty(prop, "rgba(255, 255, 255, 0)", "important");
+        } else {
+          el.style.setProperty(prop, "rgba(0, 0, 0, 0)", "important");
+        }
+      }
+
+      if (hasUnsupportedCanvasColor(computed.boxShadow)) {
+        el.style.setProperty("box-shadow", "none", "important");
+      }
+      if (hasUnsupportedCanvasColor(computed.textShadow)) {
+        el.style.setProperty("text-shadow", "none", "important");
+      }
+    }
+  }
+
+  function textSnapshotResult(loc, imageError) {
+    var rawText = (document.body && document.body.innerText) || "";
+    var visibleText = rawText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    var labels = collectSemanticLabels(200);
+    if (labels.length > 0) {
+      visibleText = visibleText + "\n\n--- Labels (alt / aria-label / placeholder) ---\n" + labels.join("\n");
+    }
+    var maxChars = 12000;
+    var truncated = false;
+    if (visibleText.length > maxChars) {
+      visibleText = visibleText.slice(0, maxChars);
+      truncated = true;
+    }
+    return {
+      success: true,
+      structuredOutput: JSON.stringify({
+        mode: "text",
+        path: loc.pathname || "",
+        url: loc.href || "",
+        title: document.title || "",
+        visibleText: visibleText,
+        labelCount: labels.length,
+        truncated: truncated,
+        imageError: imageError || null
+      }),
+      textSummary: imageError
+        ? "Image capture failed; returned text snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
+        : "Page snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
+    };
+  }
+
+  var forbiddenBrowserHttpHeaders = {
+    "accept-charset": true,
+    "accept-encoding": true,
+    "access-control-request-headers": true,
+    "access-control-request-method": true,
+    "connection": true,
+    "content-length": true,
+    "cookie": true,
+    "cookie2": true,
+    "date": true,
+    "dnt": true,
+    "expect": true,
+    "host": true,
+    "keep-alive": true,
+    "origin": true,
+    "referer": true,
+    "te": true,
+    "trailer": true,
+    "transfer-encoding": true,
+    "upgrade": true,
+    "via": true
+  };
+
+  function isObjectRecord(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function joinBrowserHttpUrl(baseUrl, path) {
+    if (!baseUrl) return path || "/";
+    if (!path || path === "/") return baseUrl;
+    return baseUrl.replace(/\/+$/, "") + "/" + path.replace(/^\/+/, "");
   }
 
   /**
@@ -457,7 +577,8 @@
                 logging: false,
                 useCORS: true,
                 backgroundColor: null,
-                scale: 1
+                scale: 1,
+                onclone: sanitizeHtml2CanvasClone
               });
             }).then(function (canvas) {
               var dataUrl = canvas.toDataURL("image/png");
@@ -474,36 +595,10 @@
                 textSummary: "Page snapshot of " + (loc.pathname || "/") + " (image, " + kb + "KB)"
               };
             }).catch(function (error) {
-              return softToolFailure("page.screenshot", {}, "Image capture failed: " + (error && error.message ? error.message : String(error)));
+              return textSnapshotResult(loc, "Image capture failed: " + (error && error.message ? error.message : String(error)));
             });
           }
-          // Text mode (default).
-          var rawText = (document.body && document.body.innerText) || "";
-          // Collapse runs of blank lines / spaces so the cap covers more real content.
-          var visibleText = rawText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-          var labels = collectSemanticLabels(200);
-          if (labels.length > 0) {
-            visibleText = visibleText + "\n\n--- Labels (alt / aria-label / placeholder) ---\n" + labels.join("\n");
-          }
-          var maxChars = 12000;
-          var truncated = false;
-          if (visibleText.length > maxChars) {
-            visibleText = visibleText.slice(0, maxChars);
-            truncated = true;
-          }
-          return {
-            success: true,
-            structuredOutput: JSON.stringify({
-              mode: "text",
-              path: loc.pathname || "",
-              url: loc.href || "",
-              title: document.title || "",
-              visibleText: visibleText,
-              labelCount: labels.length,
-              truncated: truncated
-            }),
-            textSummary: "Page snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
-          };
+          return textSnapshotResult(loc);
         });
       }
     };
@@ -692,6 +787,31 @@
       var data = JSON.parse(event.data);
       debugLog(config, "run event", runId, data.eventType, data.payload);
       emitter.emit(data.eventType, data);
+      if (data.eventType === "tool.call.requested" && data.payload.type === "BROWSER_HTTP") {
+        var browserPayload = data.payload;
+        Promise.resolve()
+          .then(function () {
+            return executeBrowserHttpTool(browserPayload);
+          })
+          .then(function (result) {
+            return postToolResult(runId, {
+              toolCallId: browserPayload.toolCallId,
+              success: result.success !== false,
+              structuredOutput: result.structuredOutput || null,
+              textSummary: result.textSummary || null,
+              error: result.error || null
+            });
+          })
+          .catch(function (error) {
+            debugLog(config, "browser http tool failed", browserPayload.toolKey, error);
+            return postToolResult(runId, {
+              toolCallId: browserPayload.toolCallId,
+              success: false,
+              error: error && error.message ? error.message : String(error)
+            });
+          });
+        return;
+      }
       if (data.eventType === "tool.call.requested" && data.payload.type === "CLIENT") {
         var resolvedToolKey = data.payload.executorKey || data.payload.toolKey;
         var handler = tools[resolvedToolKey];
@@ -728,6 +848,59 @@
             });
           });
       }
+    }
+
+    function executeBrowserHttpTool(payload) {
+      var http = payload.http || {};
+      var method = String(http.method || "GET").toUpperCase();
+      var baseUrl = String(http.baseUrl || "");
+      var path = String(http.path || "/");
+      var target = new URL(joinBrowserHttpUrl(baseUrl, path), window.location.origin);
+      if (!http.allowCrossOrigin && target.origin !== window.location.origin) {
+        throw new Error("Browser HTTP tool target must be same-origin unless metadata.allowCrossOrigin is true");
+      }
+
+      var headers = {};
+      var rawHeaders = isObjectRecord(http.headers) ? http.headers : {};
+      Object.keys(rawHeaders).forEach(function (name) {
+        var normalized = name.toLowerCase();
+        if (forbiddenBrowserHttpHeaders[normalized]) return;
+        if (normalized === "authorization") return;
+        headers[name] = String(rawHeaders[name]);
+      });
+      if (method !== "GET" && method !== "HEAD" && !headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+
+      var init = {
+        method: method,
+        credentials: http.credentials || "include",
+        headers: headers
+      };
+      if (method !== "GET" && method !== "HEAD") {
+        init.body = JSON.stringify(payload.arguments || {});
+      }
+
+      debugLog(config, "executing browser http tool", method, target.toString());
+      return fetch(target.toString(), init).then(function (response) {
+        var contentType = response.headers.get("content-type") || "";
+        var bodyPromise = contentType.indexOf("application/json") >= 0
+          ? response.json().catch(function () { return null; })
+          : response.text().catch(function () { return ""; });
+        return bodyPromise.then(function (responseBody) {
+          var structuredOutput = JSON.stringify({
+            status: response.status,
+            ok: response.ok,
+            body: responseBody
+          });
+          return {
+            success: response.ok,
+            structuredOutput: structuredOutput,
+            textSummary: "Browser HTTP " + method + " " + target.pathname + " returned " + response.status,
+            error: response.ok ? null : structuredOutput
+          };
+        });
+      });
     }
 
     function postToolResult(runId, body) {
@@ -1086,12 +1259,32 @@
       ".actbrow-widget-thinking-dot:nth-child(3){animation-delay:0.3s;}",
       "@keyframes actbrow-dot-wave{0%,40%,100%{transform:translateY(0);opacity:.6;}20%{transform:translateY(-6px);opacity:1;box-shadow:0 3px 8px rgba(0,0,0,.3);}}",
 
-      "/* Tool Activity Card */",
-      ".actbrow-widget-tool{max-width:90%;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#e5e5e5;box-shadow:0 2px 6px rgba(0,0,0,.2);}",
-      ".actbrow-widget-tool-title{font-size:11px;font-weight:700;color:#e5e5e5;display:flex;align-items:center;gap:6px;margin-bottom:5px;font-family:'Inter',sans-serif;}",
-      ".actbrow-widget-tool-icon{width:16px;height:16px;background:rgba(255,255,255,.1);border-radius:5px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.1);}",
-      ".actbrow-widget-tool-icon svg{width:10px;height:10px;fill:#e5e5e5;}",
-      ".actbrow-widget-tool-meta{font-size:10px;color:#a0a0a0;line-height:1.4;background:rgba(0,0,0,.3);padding:6px 8px;border-radius:6px;font-family:'JetBrains Mono',monospace;overflow-x:auto;border:1px solid rgba(255,255,255,.06);}",
+      "/* Tool Steps Group (collapsible per-turn) */",
+      ".actbrow-widget-steps{max-width:95%;width:95%;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);overflow:hidden;}",
+      ".actbrow-widget-steps-header{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;user-select:none;font-family:'Inter',sans-serif;color:#c8c8c8;font-size:11px;font-weight:600;letter-spacing:.01em;background:transparent;border:none;width:100%;text-align:left;transition:background .15s ease;}",
+      ".actbrow-widget-steps-header:hover{background:rgba(255,255,255,.04);}",
+      ".actbrow-widget-steps-header:focus-visible{outline:none;background:rgba(255,255,255,.06);}",
+      ".actbrow-widget-steps-icon{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:#9ca3af;flex-shrink:0;}",
+      ".actbrow-widget-steps-icon svg{width:14px;height:14px;fill:currentColor;}",
+      ".actbrow-widget-steps.is-running .actbrow-widget-steps-icon{color:#60a5fa;animation:actbrow-spin 1s linear infinite;}",
+      ".actbrow-widget-steps.is-error .actbrow-widget-steps-icon{color:#f87171;animation:none;}",
+      ".actbrow-widget-steps-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+      ".actbrow-widget-steps-chevron{width:12px;height:12px;color:#9ca3af;transition:transform .2s ease;flex-shrink:0;display:flex;align-items:center;justify-content:center;}",
+      ".actbrow-widget-steps-chevron svg{width:12px;height:12px;fill:currentColor;}",
+      ".actbrow-widget-steps.is-open .actbrow-widget-steps-chevron{transform:rotate(180deg);}",
+      ".actbrow-widget-steps-list{display:none;flex-direction:column;padding:2px 11px 10px;border-top:1px solid rgba(255,255,255,.06);}",
+      ".actbrow-widget-steps.is-open .actbrow-widget-steps-list{display:flex;}",
+      ".actbrow-widget-step{display:flex;align-items:flex-start;gap:8px;padding:7px 0;font-family:'Inter',sans-serif;}",
+      ".actbrow-widget-step + .actbrow-widget-step{border-top:1px dashed rgba(255,255,255,.05);}",
+      ".actbrow-widget-step-status{width:14px;height:14px;flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;color:#9ca3af;}",
+      ".actbrow-widget-step-status svg{width:12px;height:12px;fill:currentColor;}",
+      ".actbrow-widget-step.is-running .actbrow-widget-step-status{color:#60a5fa;animation:actbrow-spin 1s linear infinite;}",
+      ".actbrow-widget-step.is-done .actbrow-widget-step-status{color:#22c55e;}",
+      ".actbrow-widget-step.is-error .actbrow-widget-step-status{color:#f87171;}",
+      ".actbrow-widget-step-body{flex:1;min-width:0;}",
+      ".actbrow-widget-step-name{font-size:11px;font-weight:600;color:#e5e5e5;line-height:1.4;font-family:'JetBrains Mono',monospace;word-break:break-all;}",
+      ".actbrow-widget-step-meta{font-size:10px;color:#9ca3af;line-height:1.4;margin-top:2px;word-break:break-word;font-family:'JetBrains Mono',monospace;overflow-wrap:anywhere;}",
+      "@keyframes actbrow-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}",
       
       "/* Status Bar */",
       ".actbrow-widget-status{padding:0 14px 10px;color:#666;font-size:10px;min-height:18px;display:flex;align-items:center;gap:6px;font-family:'Inter',sans-serif;}",
@@ -1121,13 +1314,13 @@
       "@keyframes actbrow-badge-pulse{0%,100%{box-shadow:0 0 0 4px rgba(34,197,94,.15);}50%{box-shadow:0 0 0 8px rgba(34,197,94,.08);}}",
       
       "/* Responsive Design */",
-      "@media (max-width:640px){.actbrow-widget-root{right:12px;left:12px;bottom:12px;}.actbrow-widget-panel{width:calc(100% - 24px) !important;left:12px !important;right:12px !important;bottom:80px;height:65vh;max-height:calc(100vh - 100px);border-radius:16px;}.actbrow-widget-launcher{width:52px;height:52px;margin-left:auto;display:block;}.actbrow-widget-message,.actbrow-widget-tool{max-width:90%;}}",
+      "@media (max-width:640px){.actbrow-widget-root{right:12px;left:12px;bottom:12px;}.actbrow-widget-panel{width:calc(100% - 24px) !important;left:12px !important;right:12px !important;bottom:80px;height:65vh;max-height:calc(100vh - 100px);border-radius:16px;}.actbrow-widget-launcher{width:52px;height:52px;margin-left:auto;display:block;}.actbrow-widget-message{max-width:90%;}.actbrow-widget-steps{max-width:96%;width:96%;}}",
       
       "/* Reduced Motion */",
       "@media (prefers-reduced-motion:reduce){.actbrow-widget-launcher,.actbrow-widget-panel,.actbrow-widget-row,.actbrow-widget-close,.actbrow-widget-suggestion,.actbrow-widget-send{transition:none;animation:none;}.actbrow-widget-thinking-dot{animation:none;}}",
       
       "/* Dark Mode Support */",
-      "@media (prefers-color-scheme:dark){.actbrow-widget-launcher{background:#fff;color:#000;box-shadow:0 8px 32px rgba(255,255,255,.15);}.actbrow-widget-launcher:hover{background:#f5f5f5;}.actbrow-widget-launcher::before{background:linear-gradient(135deg,rgba(0,0,0,.1) 0%,rgba(0,0,0,.02) 100%);}.actbrow-widget-launcher::after{border-color:rgba(0,0,0,.15);}.actbrow-widget-panel{background:#1e1e1e;border-color:rgba(255,255,255,.08);box-shadow:0 32px 96px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.2);}.actbrow-widget-header{background:#252525;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-header::after{background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.06) 50%,transparent 100%);}.actbrow-widget-title{color:#e5e5e5;}.actbrow-widget-title-icon{background:#e5e5e5;}.actbrow-widget-title-icon svg{fill:#000;}.actbrow-widget-subtitle{color:#aaa;}.actbrow-widget-badge{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.3);}.actbrow-widget-badge-text{color:#4ade80;}.actbrow-widget-close{background:rgba(255,255,255,.08);color:#aaa;}.actbrow-widget-close:hover{background:rgba(255,255,255,.12);color:#e5e5e5;}.actbrow-widget-messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);}.actbrow-widget-messages::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.3);}.actbrow-widget-empty{background:#2a2a2a;border-color:rgba(255,255,255,.1);color:#ccc;}.actbrow-widget-empty-title{color:#e5e5e5;}.actbrow-widget-empty-desc{color:#aaa;}.actbrow-widget-suggestion{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.12);}.actbrow-widget-suggestion:hover{background:#303030;border-color:rgba(255,255,255,.18);}.actbrow-widget-suggestion-icon{background:#333;border-color:rgba(255,255,255,.1);}.actbrow-widget-suggestion-icon svg{fill:#e5e5e5;}.actbrow-widget-label{color:#555;}.actbrow-widget-message-assistant{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-message code{background:rgba(255,255,255,.12);}.actbrow-widget-message a{color:#e5e5e5;}.actbrow-widget-message pre{background:#0a0a0a;color:#d4d4d4;border-color:rgba(255,255,255,.08);}.actbrow-widget-thinking-dot{background:#e5e5e5;}.actbrow-widget-message-thinking{background:#2a2a2a;border-color:rgba(255,255,255,.08);}.actbrow-widget-tool{background:#2a2a2a;border-color:rgba(255,255,255,.1);color:#e5e5e5;}.actbrow-widget-tool-title{color:#e5e5e5;}.actbrow-widget-tool-icon{background:#333;border-color:rgba(255,255,255,.1);}.actbrow-widget-tool-icon svg{fill:#e5e5e5;}.actbrow-widget-tool-meta{background:#1a1a1a;border-color:rgba(255,255,255,.08);}.actbrow-widget-status{color:#aaa;}.actbrow-widget-footer{background:#0a0a0a;border-color:rgba(255,255,255,.08);}.actbrow-widget-powered{color:#777;}.actbrow-widget-powered svg{fill:#777;}.actbrow-widget-form{background:#1a1a1a;border-color:rgba(255,255,255,.15);}.actbrow-widget-input{background:#252525;color:#e5e5e5;}.actbrow-widget-input::placeholder{color:#777;}.actbrow-widget-input:focus{background:#2a2a2a;}.actbrow-widget-send{background:#e5e5e5;color:#000;}.actbrow-widget-send:hover{background:#fff;box-shadow:0 3px 10px rgba(255,255,255,.2);}}"
+      "@media (prefers-color-scheme:dark){.actbrow-widget-launcher{background:#fff;color:#000;box-shadow:0 8px 32px rgba(255,255,255,.15);}.actbrow-widget-launcher:hover{background:#f5f5f5;}.actbrow-widget-launcher::before{background:linear-gradient(135deg,rgba(0,0,0,.1) 0%,rgba(0,0,0,.02) 100%);}.actbrow-widget-launcher::after{border-color:rgba(0,0,0,.15);}.actbrow-widget-panel{background:#1e1e1e;border-color:rgba(255,255,255,.08);box-shadow:0 32px 96px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.2);}.actbrow-widget-header{background:#252525;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-header::after{background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.06) 50%,transparent 100%);}.actbrow-widget-title{color:#e5e5e5;}.actbrow-widget-title-icon{background:#e5e5e5;}.actbrow-widget-title-icon svg{fill:#000;}.actbrow-widget-subtitle{color:#aaa;}.actbrow-widget-badge{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.3);}.actbrow-widget-badge-text{color:#4ade80;}.actbrow-widget-close{background:rgba(255,255,255,.08);color:#aaa;}.actbrow-widget-close:hover{background:rgba(255,255,255,.12);color:#e5e5e5;}.actbrow-widget-messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);}.actbrow-widget-messages::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.3);}.actbrow-widget-empty{background:#2a2a2a;border-color:rgba(255,255,255,.1);color:#ccc;}.actbrow-widget-empty-title{color:#e5e5e5;}.actbrow-widget-empty-desc{color:#aaa;}.actbrow-widget-suggestion{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.12);}.actbrow-widget-suggestion:hover{background:#303030;border-color:rgba(255,255,255,.18);}.actbrow-widget-suggestion-icon{background:#333;border-color:rgba(255,255,255,.1);}.actbrow-widget-suggestion-icon svg{fill:#e5e5e5;}.actbrow-widget-label{color:#555;}.actbrow-widget-message-assistant{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-message code{background:rgba(255,255,255,.12);}.actbrow-widget-message a{color:#e5e5e5;}.actbrow-widget-message pre{background:#0a0a0a;color:#d4d4d4;border-color:rgba(255,255,255,.08);}.actbrow-widget-thinking-dot{background:#e5e5e5;}.actbrow-widget-message-thinking{background:#2a2a2a;border-color:rgba(255,255,255,.08);}.actbrow-widget-steps{background:#2a2a2a;border-color:rgba(255,255,255,.1);}.actbrow-widget-steps-header{color:#e5e5e5;}.actbrow-widget-steps-list{border-color:rgba(255,255,255,.08);}.actbrow-widget-step-name{color:#e5e5e5;}.actbrow-widget-step-meta{color:#aaa;}.actbrow-widget-status{color:#aaa;}.actbrow-widget-footer{background:#0a0a0a;border-color:rgba(255,255,255,.08);}.actbrow-widget-powered{color:#777;}.actbrow-widget-powered svg{fill:#777;}.actbrow-widget-form{background:#1a1a1a;border-color:rgba(255,255,255,.15);}.actbrow-widget-input{background:#252525;color:#e5e5e5;}.actbrow-widget-input::placeholder{color:#777;}.actbrow-widget-input:focus{background:#2a2a2a;}.actbrow-widget-send{background:#e5e5e5;color:#000;}.actbrow-widget-send:hover{background:#fff;box-shadow:0 3px 10px rgba(255,255,255,.2);}}"
     ].join(""), "actbrow-widget-styles-solid");
 
     var labels = config.labels || {};
@@ -1245,6 +1438,7 @@
     var isOpen = false;
     var isSending = false;
     var thinkingRow = null;
+    var stepsState = null;
     var statusMode = "idle";
     var hasSubmittedMessage = false;
     var panelHydrated = false;
@@ -1436,15 +1630,154 @@
       container.appendChild(options);
     }
 
-    function appendToolActivity(title, meta) {
-      var row = appendRow("system", labels.activity || "Activity");
-      var item = document.createElement("div");
-      item.className = "actbrow-widget-tool";
-      item.innerHTML = '<div class="actbrow-widget-tool-title"><div class="actbrow-widget-tool-icon"><svg viewBox="0 0 24 24"><path d="M22 11V3h-7v3H9V3H2v8h7V8h2v10h4v3h7v-8h-7v3h-2V8h2v3z"/></svg></div>' + escapeHtml(title) + '</div>' +
-        '<div class="actbrow-widget-tool-meta">' + escapeHtml(meta || "") + '</div>';
-      row.appendChild(item);
+    var STEP_ICON_RUNNING = '<svg viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5h-2A4.5 4.5 0 1 1 8 3.5z"/></svg>';
+    var STEP_ICON_DONE = '<svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7 7a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06L6.25 10.69l6.47-6.47a.75.75 0 0 1 1.06 0z"/></svg>';
+    var STEP_ICON_ERROR = '<svg viewBox="0 0 16 16"><path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06z"/></svg>';
+    var STEPS_CHEVRON = '<svg viewBox="0 0 16 16"><path d="M3.22 5.78a.75.75 0 0 1 1.06 0L8 9.5l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 6.84a.75.75 0 0 1 0-1.06z"/></svg>';
+    var STEPS_ICON_DONE = '<svg viewBox="0 0 16 16"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H3a1 1 0 0 1-1-1zm0 4a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H3a1 1 0 0 1-1-1zm1 3a1 1 0 1 0 0 2h10a1 1 0 1 0 0-2z"/></svg>';
+
+    function truncateText(value, max) {
+      var s = String(value == null ? "" : value);
+      return s.length > max ? s.slice(0, max - 1) + "…" : s;
+    }
+
+    function formatStepArgs(args) {
+      if (!args) return "";
+      try {
+        return truncateText(JSON.stringify(args), 180);
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function ensureStepsRow() {
+      if (stepsState) return stepsState;
+      var row = appendRow("assistant", labels.activity || "Steps");
+      var box = document.createElement("div");
+      box.className = "actbrow-widget-steps is-open is-running";
+      var header = document.createElement("button");
+      header.type = "button";
+      header.className = "actbrow-widget-steps-header";
+      header.setAttribute("aria-expanded", "true");
+      var icon = document.createElement("span");
+      icon.className = "actbrow-widget-steps-icon";
+      icon.innerHTML = STEP_ICON_RUNNING;
+      var title = document.createElement("span");
+      title.className = "actbrow-widget-steps-title";
+      title.textContent = "Working…";
+      var chevron = document.createElement("span");
+      chevron.className = "actbrow-widget-steps-chevron";
+      chevron.innerHTML = STEPS_CHEVRON;
+      header.appendChild(icon);
+      header.appendChild(title);
+      header.appendChild(chevron);
+      var list = document.createElement("div");
+      list.className = "actbrow-widget-steps-list";
+      box.appendChild(header);
+      box.appendChild(list);
+      row.appendChild(box);
+      header.addEventListener("click", function () {
+        var nowOpen = box.classList.toggle("is-open");
+        header.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+      });
+      stepsState = {
+        row: row,
+        box: box,
+        list: list,
+        header: header,
+        headerIcon: icon,
+        headerTitle: title,
+        items: {},
+        order: [],
+        count: 0,
+        failed: 0
+      };
       scrollToBottom();
-      return row;
+      return stepsState;
+    }
+
+    function addStepRequested(payload) {
+      var state = ensureStepsRow();
+      var toolCallId = payload.toolCallId || ("step-" + state.count);
+      state.count += 1;
+      var item = document.createElement("div");
+      item.className = "actbrow-widget-step is-running";
+      var statusEl = document.createElement("span");
+      statusEl.className = "actbrow-widget-step-status";
+      statusEl.innerHTML = STEP_ICON_RUNNING;
+      var bodyEl = document.createElement("div");
+      bodyEl.className = "actbrow-widget-step-body";
+      var nameEl = document.createElement("div");
+      nameEl.className = "actbrow-widget-step-name";
+      nameEl.textContent = payload.toolKey || payload.executorKey || "tool";
+      var metaEl = document.createElement("div");
+      metaEl.className = "actbrow-widget-step-meta";
+      var argsText = formatStepArgs(payload.arguments);
+      metaEl.textContent = argsText || "Running…";
+      bodyEl.appendChild(nameEl);
+      bodyEl.appendChild(metaEl);
+      item.appendChild(statusEl);
+      item.appendChild(bodyEl);
+      state.list.appendChild(item);
+      state.items[toolCallId] = { item: item, statusEl: statusEl, metaEl: metaEl, args: argsText };
+      state.order.push(toolCallId);
+      state.headerTitle.textContent = "Running " + state.count + " step" + (state.count === 1 ? "" : "s") + "…";
+      scrollToBottom();
+    }
+
+    function markStepCompleted(payload) {
+      if (!stepsState) return;
+      var entry = stepsState.items[payload.toolCallId];
+      if (!entry) return;
+      var success = payload.success !== false;
+      entry.item.classList.remove("is-running");
+      entry.item.classList.add(success ? "is-done" : "is-error");
+      entry.statusEl.innerHTML = success ? STEP_ICON_DONE : STEP_ICON_ERROR;
+      var summary = payload.textSummary || payload.error || (success ? "Completed" : "Failed");
+      entry.metaEl.textContent = truncateText(summary, 240);
+      if (!success) stepsState.failed += 1;
+    }
+
+    function finalizeStepsRow(finalState) {
+      if (!stepsState) return;
+      var state = stepsState;
+      stepsState = null;
+      state.order.forEach(function (id) {
+        var entry = state.items[id];
+        if (entry.item.classList.contains("is-running")) {
+          entry.item.classList.remove("is-running");
+          entry.item.classList.add("is-error");
+          entry.statusEl.innerHTML = STEP_ICON_ERROR;
+          entry.metaEl.textContent = finalState === "failed" ? "Did not complete" : "Stopped";
+          state.failed += 1;
+        }
+      });
+      var n = state.count;
+      if (n === 0) {
+        if (state.row.parentNode) state.row.parentNode.removeChild(state.row);
+        return;
+      }
+      var label;
+      if (finalState === "failed") {
+        label = "Stopped after " + n + " step" + (n === 1 ? "" : "s");
+      } else if (finalState === "cancelled") {
+        label = "Cancelled after " + n + " step" + (n === 1 ? "" : "s");
+      } else if (state.failed > 0) {
+        label = "Used " + n + " step" + (n === 1 ? "" : "s") + " · " + state.failed + " failed";
+      } else {
+        label = "Used " + n + " step" + (n === 1 ? "" : "s");
+      }
+      state.headerTitle.textContent = label;
+      state.box.classList.remove("is-running");
+      state.box.classList.remove("is-open");
+      state.header.setAttribute("aria-expanded", "false");
+      var bad = state.failed > 0 || finalState === "failed" || finalState === "cancelled";
+      if (bad) {
+        state.box.classList.add("is-error");
+        state.headerIcon.innerHTML = STEP_ICON_ERROR;
+      } else {
+        state.headerIcon.innerHTML = STEPS_ICON_DONE;
+      }
     }
 
     function removeThinkingRow() {
@@ -1545,6 +1878,7 @@
     function beginNewConversation() {
       removeThinkingRow();
       thinkingRow = null;
+      stepsState = null;
       while (messages.firstChild) {
         messages.removeChild(messages.firstChild);
       }
@@ -1597,8 +1931,6 @@
                     appendMessage("user", m.content);
                   } else if (role === "ASSISTANT") {
                     appendMessage("assistant", m.content);
-                  } else if (role === "TOOL") {
-                    appendToolActivity("Tool", m.content);
                   }
                 });
                 scrollToBottom();
@@ -1654,22 +1986,22 @@
 
     client.on("tool.call.requested", function (event) {
       if (event && event.payload) {
-        ensureThinkingRow();
+        removeThinkingRow();
         setStatus("Running " + event.payload.toolKey + "...");
-        appendToolActivity("Running " + event.payload.toolKey, JSON.stringify(event.payload.arguments || {}));
+        addStepRequested(event.payload);
       }
     });
 
     client.on("tool.call.completed", function (event) {
-      var meta = event && event.payload && event.payload.textSummary
-        ? event.payload.textSummary
-        : "Tool completed successfully.";
+      if (event && event.payload) {
+        markStepCompleted(event.payload);
+      }
       setStatus("Tool completed.");
-      appendToolActivity("Tool completed", meta);
     });
 
     client.on("assistant.message.completed", function (event) {
       removeThinkingRow();
+      finalizeStepsRow("completed");
       appendMessage("assistant", event.payload.content, event.payload);
       setStatus("");
       setSendingState(false);
@@ -1677,6 +2009,7 @@
 
     client.on("run.failed", function (event) {
       removeThinkingRow();
+      finalizeStepsRow("failed");
       appendMessage("assistant", "Request failed: " + event.payload.message);
       setStatus("");
       setSendingState(false);
@@ -1684,6 +2017,7 @@
 
     client.on("run.cancelled", function () {
       removeThinkingRow();
+      finalizeStepsRow("cancelled");
       appendMessage("assistant", labels.cancelledMessage || "Stopped.");
       setStatus("");
       setSendingState(false);

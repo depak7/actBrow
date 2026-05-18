@@ -235,18 +235,21 @@ public class RunService {
 						.orElseThrow(() -> new IllegalArgumentException("Unknown tool requested by model: " + toolCall.toolKey()));
 					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
 					String executorKey = resolveExecutorKey(tool);
-					eventBroker.emit(runId, "tool.call.requested", Map.of(
-						"toolCallId", toolCall.toolCallId(),
-						"toolId", tool.id(),
-						"toolKey", tool.key(),
-						"executorKey", executorKey,
-						"type", wireToolTypeForClients(tool),
-						"arguments", executionArguments));
+					Map<String, Object> requestedPayload = new LinkedHashMap<>();
+					requestedPayload.put("toolCallId", toolCall.toolCallId());
+					requestedPayload.put("toolId", tool.id());
+					requestedPayload.put("toolKey", tool.key());
+					requestedPayload.put("executorKey", executorKey);
+					requestedPayload.put("type", wireToolTypeForClients(tool));
+					requestedPayload.put("arguments", executionArguments);
+					if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
+						requestedPayload.put("http", browserHttpPayload(tool));
+					}
+					eventBroker.emit(runId, "tool.call.requested", requestedPayload);
 					recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
 
 					ToolExecutionResult result = executeTool(run, toolCall, tool, executionArguments);
-					String toolMessage = result.textSummary() != null ? result.textSummary()
-						: result.structuredOutput() != null ? result.structuredOutput() : result.error();
+					String toolMessage = toolResultContentForModel(result);
 					// Store TOOL message with its toolCallId so providers can pair it with the ASSISTANT entry
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
 						toolCall.toolCallId());
@@ -300,7 +303,8 @@ public class RunService {
 				+ "Stop calling tools and produce a final answer for the user instead.";
 			return new ToolExecutionResult(false, null, message, message);
 		}
-		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
+		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())
+			|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
 			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
 			runRepository.save(run);
 			try {
@@ -330,7 +334,26 @@ public class RunService {
 		return builtinServerToolExecutor.execute(tool, executionArguments);
 	}
 
+	/**
+	 * Text stored on the TOOL conversation row for the next model turn. Prefer structured payloads (JSON
+	 * bodies from HTTP/browser tools, observation snapshots) over short summaries — otherwise the model
+	 * only sees e.g. "Browser HTTP GET … returned 200" with no response body.
+	 */
+	private static String toolResultContentForModel(ToolExecutionResult result) {
+		if (result.structuredOutput() != null && !result.structuredOutput().isBlank()) {
+			return result.structuredOutput();
+		}
+		if (result.textSummary() != null && !result.textSummary().isBlank()) {
+			return result.textSummary();
+		}
+		String err = result.error();
+		return err != null ? err : "";
+	}
+
 	private static String wireToolTypeForClients(ToolDescriptor tool) {
+		if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
+			return "BROWSER_HTTP";
+		}
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			return ToolType.CLIENT.name();
 		}
@@ -338,6 +361,18 @@ public class RunService {
 			return ToolType.SERVER_HTTP.name();
 		}
 		return tool.type().name();
+	}
+
+	private static Map<String, Object> browserHttpPayload(ToolDescriptor tool) {
+		Map<String, Object> metadata = tool.metadata() == null ? Map.of() : tool.metadata();
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("method", metadata.getOrDefault("method", "GET"));
+		payload.put("baseUrl", metadata.getOrDefault("baseUrl", ""));
+		payload.put("path", metadata.getOrDefault("path", "/"));
+		payload.put("headers", metadata.getOrDefault("headers", Map.of()));
+		payload.put("credentials", metadata.getOrDefault("credentials", "include"));
+		payload.put("allowCrossOrigin", metadata.getOrDefault("allowCrossOrigin", false));
+		return payload;
 	}
 
 	private String toolCallSignature(ToolDescriptor tool, Map<String, Object> arguments) {

@@ -9,7 +9,9 @@ import com.actbrow.actbrow.model.UserEntity;
 
 @Repository
 public interface UserRepository extends JpaRepository<UserEntity, String> {
-	Optional<UserEntity> findByEmail(String email);
+
 	Optional<UserEntity> findByGoogleId(String googleId);
+
 	Optional<UserEntity> findByApiKey(String apiKey);
+
 }

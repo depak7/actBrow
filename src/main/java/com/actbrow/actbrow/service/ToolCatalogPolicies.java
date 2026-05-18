@@ -1,6 +1,7 @@
 package com.actbrow.actbrow.service;
 
 import com.actbrow.actbrow.api.dto.ToolResponse;
+import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.model.ToolDefinitionEntity;
 import com.actbrow.actbrow.model.ToolType;
 
@@ -47,6 +48,14 @@ public final class ToolCatalogPolicies {
 			return executorRef != null && isClientSideCatalogExecutor(executorRef);
 		}
 		return false;
+	}
+
+	public static boolean executesAsBrowserHttpTool(ToolDescriptor tool) {
+		if (tool.type() != ToolType.SERVER_HTTP) {
+			return false;
+		}
+		Object execution = tool.metadata() == null ? null : tool.metadata().get("execution");
+		return execution != null && "browser".equalsIgnoreCase(execution.toString());
 	}
 
 	public static boolean executesAsHttpTool(ToolType type, String executorRef) {
