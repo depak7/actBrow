@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties({
 	ActbrowProperties.class,
 	ActbrowSnapshotProperties.class,
+	ActbrowPublicProperties.class,
 	GoogleOAuthProperties.class,
 	CorsProperties.class
 })
@@ -40,6 +41,9 @@ public class AppConfig {
 			"Accept",
 			"Authorization",
 			"X-API-Key",
+			"X-Actbrow-Auth-Type",
+			"X-Actbrow-Assistant-Id",
+			"X-User-Id",
 			"X-Requested-With"
 		));
 		configuration.setAllowedMethods(Arrays.asList(

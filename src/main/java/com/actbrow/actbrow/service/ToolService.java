@@ -6,6 +6,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import java.util.Optional;
+
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -53,10 +55,10 @@ public class ToolService {
 			.orElseGet(() -> saveNewEntity(new ToolDefinitionEntity(), request, key));
 	}
 
-	public void attachBuiltInClientTools(String assistantId) {
+	public void attachBuiltInTools(String assistantId) {
 		for (ToolDefinitionEntity toolEntity : toolRepository.findAll()) {
 			ToolResponse tool = toResponse(toolEntity);
-			if (!ToolCatalogPolicies.isBuiltInClientAttachmentCandidate(tool)) {
+			if (!ToolCatalogPolicies.isBuiltInAttachmentCandidate(tool)) {
 				continue;
 			}
 			bindingRepository.findByAssistantIdAndToolId(assistantId, tool.id()).ifPresentOrElse(
@@ -69,6 +71,10 @@ public class ToolService {
 					bindingRepository.save(binding);
 				});
 		}
+	}
+
+	public void attachBuiltInClientTools(String assistantId) {
+		attachBuiltInTools(assistantId);
 	}
 
 	@Transactional
@@ -154,6 +160,19 @@ public class ToolService {
 		entity.setAssistantId(assistantId);
 		entity.setToolId(toolId);
 		bindingRepository.save(entity);
+	}
+
+	public Optional<ToolDefinitionEntity> findByKey(String key) {
+		return toolRepository.findByKey(key);
+	}
+
+	public void attachToolIfAbsent(String assistantId, String toolKey) {
+		ToolDefinitionEntity tool = toolRepository.findByKey(toolKey)
+			.orElseThrow(() -> new IllegalArgumentException("Tool not found: " + toolKey));
+		if (bindingRepository.findByAssistantIdAndToolId(assistantId, tool.getId()).isPresent()) {
+			return;
+		}
+		attachTool(assistantId, tool.getId());
 	}
 
 	public ToolResponse createAndAttach(String assistantId, ToolRequest request) {

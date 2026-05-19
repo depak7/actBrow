@@ -270,4 +270,5 @@ public class GeminiModelProvider implements ModelProvider {
 		builder.append("Do not use the OPTIONS format unless you are actually asking the user to choose.");
 		return builder.toString();
 	}
+
 }

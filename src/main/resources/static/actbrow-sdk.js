@@ -1324,11 +1324,14 @@
     ].join(""), "actbrow-widget-styles-solid");
 
     var labels = config.labels || {};
-    var suggestions = config.suggestions || [
-      "Show my orders",
-      "Open my profile",
-      "Take me to settings"
-    ];
+    var suggestions = Array.isArray(config.suggestions)
+      ? config.suggestions.filter(function (s) { return typeof s === "string" && s.trim(); })
+      : [];
+    var emptyTitle = labels.emptyTitle !== undefined ? labels.emptyTitle : "How can I help?";
+    var emptyDesc = labels.emptyDesc !== undefined
+      ? labels.emptyDesc
+      : "Ask a question or describe what you need.";
+    var showEmptyState = config.hideEmptyState !== true;
     var root = document.createElement("div");
     root.className = "actbrow-widget-root";
 
@@ -1804,7 +1807,9 @@
 
     function submitPrompt(text) {
       hasSubmittedMessage = true;
-      removeEmptyState();
+      if (showEmptyState) {
+        removeEmptyState();
+      }
       appendMessage("user", text);
       input.value = "";
       setSendingState(true);
@@ -1823,18 +1828,31 @@
     }
 
     function renderEmptyState() {
-      if (document.getElementById("actbrow-widget-empty-state")) {
+      if (!showEmptyState || document.getElementById("actbrow-widget-empty-state")) {
+        return;
+      }
+      var parts = [];
+      if (emptyTitle) {
+        parts.push('<div class="actbrow-widget-empty-title">' + escapeHtml(emptyTitle) + '</div>');
+      }
+      if (emptyDesc) {
+        parts.push('<div class="actbrow-widget-empty-desc">' + escapeHtml(emptyDesc) + '</div>');
+      }
+      if (suggestions.length) {
+        parts.push('<div class="actbrow-widget-suggestions"></div>');
+      }
+      if (!parts.length) {
         return;
       }
       var item = document.createElement("div");
       item.id = "actbrow-widget-empty-state";
       item.className = "actbrow-widget-empty";
-      item.innerHTML =
-        '<div class="actbrow-widget-empty-title">' + escapeHtml(labels.emptyTitle || "How can I help you today?") + '</div>' +
-        '<div class="actbrow-widget-empty-desc">' + escapeHtml(labels.emptyDesc || "Ask for help or ask me to do something in this app.") + '</div>' +
-        '<div class="actbrow-widget-suggestions"></div>';
+      item.innerHTML = parts.join("");
       messages.appendChild(item);
       var suggestionContainer = item.querySelector(".actbrow-widget-suggestions");
+      if (!suggestionContainer) {
+        return;
+      }
       var suggestionIcons = [
         '<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>',
         '<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>',
@@ -1862,15 +1880,18 @@
     }
 
     function addWelcomeIfNeeded() {
-      if (!messages.childElementCount) {
+      if (!messages.childElementCount && (labels.welcomeTitle || labels.welcome)) {
         var welcomeRow = appendRow("assistant", labels.assistant || "Assistant");
         var welcomeItem = document.createElement("div");
         welcomeItem.className = "actbrow-widget-message actbrow-widget-message-assistant";
-        welcomeItem.innerHTML =
-          '<strong>' +
-          escapeHtml(labels.welcomeTitle || "Hi there! 👋") +
-          "</strong><br/>" +
-          escapeHtml(labels.welcome || "I can answer questions and also navigate and act inside this page.");
+        var welcomeHtml = "";
+        if (labels.welcomeTitle) {
+          welcomeHtml += "<strong>" + escapeHtml(labels.welcomeTitle) + "</strong>";
+        }
+        if (labels.welcome) {
+          welcomeHtml += (welcomeHtml ? "<br/>" : "") + escapeHtml(labels.welcome);
+        }
+        welcomeItem.innerHTML = welcomeHtml;
         welcomeRow.appendChild(welcomeItem);
       }
     }
@@ -1892,7 +1913,9 @@
         setSendingState(false);
         if (isOpen) {
           addWelcomeIfNeeded();
-          renderEmptyState();
+          if (showEmptyState) {
+            renderEmptyState();
+          }
           scrollToBottom();
         }
       });
@@ -1906,7 +1929,9 @@
 
       function finishOpen() {
         if (!hasSubmittedMessage) {
-          renderEmptyState();
+          if (showEmptyState) {
+            renderEmptyState();
+          }
         } else {
           removeEmptyState();
         }
@@ -2048,6 +2073,7 @@
   }
 
   global.Actbrow = {
+    SDK_VERSION: "3",
     createActbrowClient: createActbrowClient,
     createActbrowWidget: createActbrowWidget
   };

@@ -30,10 +30,10 @@ public class BuiltinToolSeeder implements ApplicationRunner {
 		for (String key : RETIRED_TOOL_KEYS) {
 			toolService.deleteByKeyIfPresent(key);
 		}
-		for (var tool : builtInToolCatalog.builtInClientTools()) {
+		for (var tool : builtInToolCatalog.allBuiltInTools()) {
 			toolService.upsertByKey(tool);
 		}
 		assistantRepository.findAll()
-			.forEach(assistant -> toolService.attachBuiltInClientTools(assistant.getId()));
+			.forEach(assistant -> toolService.attachBuiltInTools(assistant.getId()));
 	}
 }

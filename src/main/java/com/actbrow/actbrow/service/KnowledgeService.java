@@ -51,7 +51,25 @@ public class KnowledgeService {
 		knowledgeDocumentRepository.delete(entity);
 	}
 
+	public boolean upsertByTitle(String assistantId, String title, String content, String source, boolean enabled) {
+		var existing = knowledgeDocumentRepository.findByAssistantIdAndTitle(assistantId, title.trim());
+		if (existing.isPresent()) {
+			KnowledgeDocumentEntity entity = existing.get();
+			entity.setContent(content.trim());
+			entity.setSource(trimToNull(source));
+			entity.setEnabled(enabled);
+			knowledgeDocumentRepository.save(entity);
+			return true;
+		}
+		create(assistantId, new KnowledgeDocumentRequest(title.trim(), content.trim(), source, enabled));
+		return false;
+	}
+
 	public List<KnowledgeDocumentResponse> findRelevant(String assistantId, String query, int limit) {
+		return findRelevant(assistantId, query, null, limit);
+	}
+
+	public List<KnowledgeDocumentResponse> findRelevant(String assistantId, String query, String path, int limit) {
 		List<KnowledgeDocumentEntity> docs = knowledgeDocumentRepository
 			.findAllByAssistantIdAndEnabledTrueOrderByUpdatedAtDesc(assistantId);
 		if (docs.isEmpty()) {
@@ -59,7 +77,7 @@ public class KnowledgeService {
 		}
 		Set<String> queryTerms = extractTerms(query);
 		return docs.stream()
-			.map(doc -> new ScoredKnowledgeDocument(doc, score(doc, query, queryTerms)))
+			.map(doc -> new ScoredKnowledgeDocument(doc, score(doc, query, queryTerms, path)))
 			.filter(scored -> !queryTerms.isEmpty() ? scored.score() > 0 : true)
 			.sorted(Comparator
 				.comparingInt(ScoredKnowledgeDocument::score).reversed()
@@ -69,7 +87,7 @@ public class KnowledgeService {
 			.toList();
 	}
 
-	private int score(KnowledgeDocumentEntity doc, String query, Set<String> queryTerms) {
+	private int score(KnowledgeDocumentEntity doc, String query, Set<String> queryTerms, String path) {
 		String haystack = searchableText(doc);
 		if (query == null || query.isBlank()) {
 			return 1;
@@ -85,7 +103,28 @@ public class KnowledgeService {
 				score += term.length() > 5 ? 3 : 2;
 			}
 		}
+		score += pageBoost(path, haystack);
 		return score;
+	}
+
+	private int pageBoost(String path, String haystack) {
+		if (path == null || path.isBlank()) {
+			return 0;
+		}
+		int boost = 0;
+		String normalizedPath = normalize(path.replace('/', ' '));
+		if (!normalizedPath.isBlank() && haystack.contains(normalizedPath)) {
+			boost += 5;
+		}
+		for (String segment : path.split("/")) {
+			if (segment.length() >= 3) {
+				String normalizedSegment = normalize(segment);
+				if (!normalizedSegment.isBlank() && haystack.contains(normalizedSegment)) {
+					boost += 2;
+				}
+			}
+		}
+		return boost;
 	}
 
 	private String searchableText(KnowledgeDocumentEntity doc) {

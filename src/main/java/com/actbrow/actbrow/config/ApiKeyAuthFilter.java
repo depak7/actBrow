@@ -1,6 +1,7 @@
 package com.actbrow.actbrow.config;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,6 +14,8 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 
+import com.actbrow.actbrow.model.AssistantDefinitionEntity;
+import com.actbrow.actbrow.repository.AssistantRepository;
 import com.actbrow.actbrow.repository.UserRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,11 +28,18 @@ public class ApiKeyAuthFilter implements WebFilter {
 
 	private static final Logger log = LoggerFactory.getLogger(ApiKeyAuthFilter.class);
 
+	private static final Set<String> WIDGET_PREFIXES = Set.of(
+		"/v1/conversations",
+		"/v1/runs");
+
 	private final UserRepository userRepository;
+	private final AssistantRepository assistantRepository;
 	private final ObjectMapper objectMapper;
 
-	public ApiKeyAuthFilter(UserRepository userRepository, ObjectMapper objectMapper) {
+	public ApiKeyAuthFilter(UserRepository userRepository, AssistantRepository assistantRepository,
+		ObjectMapper objectMapper) {
 		this.userRepository = userRepository;
+		this.assistantRepository = assistantRepository;
 		this.objectMapper = objectMapper;
 	}
 
@@ -56,27 +66,79 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 
 		try {
-			var user = userRepository.findByApiKey(apiKey)
-				.orElseThrow(() -> new IllegalArgumentException("Invalid API key"));
-			ServerWebExchange authenticatedExchange = exchange.mutate()
-				.request(exchange.getRequest().mutate()
-					.headers(h -> h.remove("X-User-Id"))
-					.header("X-User-Id", user.getId())
-					.build())
-				.build();
-			return chain.filter(authenticatedExchange);
+			if (apiKey.startsWith("sk_")) {
+				return authenticateSetupKey(exchange, chain, apiKey, method, path);
+			}
+			if (apiKey.startsWith("wk_")) {
+				return authenticateWidgetKey(exchange, chain, apiKey, path);
+			}
+			return authenticateAccountKey(exchange, chain, apiKey);
 		}
 		catch (IllegalArgumentException e) {
-			return unauthorized(exchange, "Invalid API key");
+			return unauthorized(exchange, e.getMessage());
 		}
 	}
 
-	/**
-	 * Unauthenticated routes. Paths use segment boundaries: {@code /v1/foo} does not match {@code /v1/foobar}.
-	 *
-	 * Dashboard ops on {@code /v1/assistants} are open at v1 — see the README's "Self-hosted single-developer
-	 * mode" note. Wire Google-OAuth-session auth before deploying multi-customer.
-	 */
+	private Mono<Void> authenticateSetupKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
+		String method, String path) {
+		if (!isSetupRoute(method, path)) {
+			return unauthorized(exchange, "Setup key cannot access this route");
+		}
+		AssistantDefinitionEntity assistant = assistantRepository.findBySetupKey(apiKey)
+			.orElseThrow(() -> new IllegalArgumentException("Invalid setup key"));
+		ServerWebExchange authenticatedExchange = exchange.mutate()
+			.request(exchange.getRequest().mutate()
+				.headers(h -> {
+					h.remove("X-User-Id");
+					h.remove("X-Actbrow-Auth-Type");
+					h.remove("X-Actbrow-Assistant-Id");
+					h.set("X-Actbrow-Auth-Type", "setup");
+					h.set("X-Actbrow-Assistant-Id", assistant.getId());
+				})
+				.build())
+			.build();
+		return chain.filter(authenticatedExchange);
+	}
+
+	private Mono<Void> authenticateWidgetKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
+		String path) {
+		if (!isWidgetRoute(path)) {
+			return unauthorized(exchange, "Widget key cannot access this route");
+		}
+		AssistantDefinitionEntity assistant = assistantRepository.findByWidgetKey(apiKey)
+			.orElseThrow(() -> new IllegalArgumentException("Invalid widget key"));
+		ServerWebExchange authenticatedExchange = exchange.mutate()
+			.request(exchange.getRequest().mutate()
+				.headers(h -> {
+					h.remove("X-User-Id");
+					h.remove("X-Actbrow-Auth-Type");
+					h.remove("X-Actbrow-Assistant-Id");
+					h.set("X-Actbrow-Auth-Type", "widget");
+					h.set("X-Actbrow-Assistant-Id", assistant.getId());
+					h.set("X-User-Id", assistant.getUserId());
+				})
+				.build())
+			.build();
+		return chain.filter(authenticatedExchange);
+	}
+
+	private Mono<Void> authenticateAccountKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey) {
+		var user = userRepository.findByApiKey(apiKey)
+			.orElseThrow(() -> new IllegalArgumentException("Invalid API key"));
+		ServerWebExchange authenticatedExchange = exchange.mutate()
+			.request(exchange.getRequest().mutate()
+				.headers(h -> {
+					h.remove("X-User-Id");
+					h.remove("X-Actbrow-Auth-Type");
+					h.remove("X-Actbrow-Assistant-Id");
+					h.set("X-Actbrow-Auth-Type", "account");
+					h.set("X-User-Id", user.getId());
+				})
+				.build())
+			.build();
+		return chain.filter(authenticatedExchange);
+	}
+
 	private boolean isPublicRoute(String method, String path) {
 		if ("GET".equalsIgnoreCase(method) && "/health".equals(path)) {
 			return true;
@@ -85,6 +147,9 @@ public class ApiKeyAuthFilter implements WebFilter {
 			return true;
 		}
 		if (segmentsMatch(path, "/v1/assistants")) {
+			if (path.endsWith("/sync") || path.endsWith("/connect") || path.endsWith("/export")) {
+				return false;
+			}
 			return true;
 		}
 		if ("/actbrow-sdk.js".equals(path) || "/actbrow-widget.js".equals(path)) {
@@ -94,6 +159,14 @@ public class ApiKeyAuthFilter implements WebFilter {
 			return true;
 		}
 		return segmentsMatch(path, "/auth");
+	}
+
+	private static boolean isSetupRoute(String method, String path) {
+		return "PUT".equalsIgnoreCase(method) && path.matches("/v1/assistants/[^/]+/sync");
+	}
+
+	private static boolean isWidgetRoute(String path) {
+		return WIDGET_PREFIXES.stream().anyMatch(prefix -> segmentsMatch(path, prefix));
 	}
 
 	private static boolean segmentsMatch(String path, String prefix) {

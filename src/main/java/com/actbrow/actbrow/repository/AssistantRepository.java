@@ -11,5 +11,9 @@ public interface AssistantRepository extends JpaRepository<AssistantDefinitionEn
 
 	Optional<AssistantDefinitionEntity> findByKey(String key);
 
+	Optional<AssistantDefinitionEntity> findBySetupKey(String setupKey);
+
+	Optional<AssistantDefinitionEntity> findByWidgetKey(String widgetKey);
+
 	List<AssistantDefinitionEntity> findAllByUserId(String userId);
 }

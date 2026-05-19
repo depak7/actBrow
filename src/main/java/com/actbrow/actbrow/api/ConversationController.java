@@ -39,7 +39,12 @@ public class ConversationController {
 	}
 
 	@PostMapping
-	public ConversationResponse create(@Valid @RequestBody ConversationRequest request) {
+	public ConversationResponse create(@Valid @RequestBody ConversationRequest request,
+		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId) {
+		if ("widget".equals(authType) && authAssistantId != null && !authAssistantId.equals(request.assistantId())) {
+			throw new IllegalArgumentException("Widget key is not authorized for this assistant");
+		}
 		return conversationService.create(request);
 	}
 

@@ -40,7 +40,9 @@
       debug: debug,
       navigate: config.navigate,
       router: config.router,
-      routerMethod: config.routerMethod
+      routerMethod: config.routerMethod,
+      labels: config.labels,
+      suggestions: config.suggestions
     });
   }
 

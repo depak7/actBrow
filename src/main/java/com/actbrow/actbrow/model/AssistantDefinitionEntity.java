@@ -34,6 +34,21 @@ public class AssistantDefinitionEntity {
 	@Column(name = "api_key", nullable = false, unique = true)
 	private String apiKey;
 
+	@Column(name = "setup_key", unique = true)
+	private String setupKey;
+
+	@Column(name = "widget_key", unique = true)
+	private String widgetKey;
+
+	@Column(name = "allowed_origins_json", columnDefinition = "TEXT")
+	private String allowedOriginsJson;
+
+	@Column(name = "last_synced_at")
+	private Instant lastSyncedAt;
+
+	@Column(name = "last_sync_summary_json", columnDefinition = "TEXT")
+	private String lastSyncSummaryJson;
+
 	@Column(name = "user_id", nullable = false)
 	private String userId;
 
@@ -104,6 +119,46 @@ public class AssistantDefinitionEntity {
 
 	public void setApiKey(String apiKey) {
 		this.apiKey = apiKey;
+	}
+
+	public String getSetupKey() {
+		return setupKey;
+	}
+
+	public void setSetupKey(String setupKey) {
+		this.setupKey = setupKey;
+	}
+
+	public String getWidgetKey() {
+		return widgetKey;
+	}
+
+	public void setWidgetKey(String widgetKey) {
+		this.widgetKey = widgetKey;
+	}
+
+	public String getAllowedOriginsJson() {
+		return allowedOriginsJson;
+	}
+
+	public void setAllowedOriginsJson(String allowedOriginsJson) {
+		this.allowedOriginsJson = allowedOriginsJson;
+	}
+
+	public Instant getLastSyncedAt() {
+		return lastSyncedAt;
+	}
+
+	public void setLastSyncedAt(Instant lastSyncedAt) {
+		this.lastSyncedAt = lastSyncedAt;
+	}
+
+	public String getLastSyncSummaryJson() {
+		return lastSyncSummaryJson;
+	}
+
+	public void setLastSyncSummaryJson(String lastSyncSummaryJson) {
+		this.lastSyncSummaryJson = lastSyncSummaryJson;
 	}
 
 	public String getUserId() {

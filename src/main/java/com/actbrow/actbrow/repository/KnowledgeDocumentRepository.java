@@ -14,4 +14,6 @@ public interface KnowledgeDocumentRepository extends JpaRepository<KnowledgeDocu
 	List<KnowledgeDocumentEntity> findAllByAssistantIdAndEnabledTrueOrderByUpdatedAtDesc(String assistantId);
 
 	Optional<KnowledgeDocumentEntity> findByAssistantIdAndId(String assistantId, String id);
+
+	Optional<KnowledgeDocumentEntity> findByAssistantIdAndTitle(String assistantId, String title);
 }

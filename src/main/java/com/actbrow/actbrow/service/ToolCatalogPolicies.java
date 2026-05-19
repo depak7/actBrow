@@ -30,14 +30,27 @@ public final class ToolCatalogPolicies {
 		return false;
 	}
 
-	public static boolean isBuiltInClientAttachmentCandidate(ToolResponse tool) {
+	public static boolean isBuiltInAttachmentCandidate(ToolResponse tool) {
 		if (tool.executorRef() == null || !tool.key().equals(tool.executorRef())) {
 			return false;
 		}
-		if (tool.type() == ToolType.BUILD_IN || tool.type() == ToolType.CLIENT) {
+		if (tool.type() == ToolType.BUILD_IN) {
+			return isClientSideCatalogExecutor(tool.executorRef()) || isServerSideCatalogExecutor(tool.executorRef());
+		}
+		if (tool.type() == ToolType.CLIENT) {
 			return isClientSideCatalogExecutor(tool.executorRef());
 		}
 		return false;
+	}
+
+	/** @deprecated use {@link #isBuiltInAttachmentCandidate} */
+	@Deprecated
+	public static boolean isBuiltInClientAttachmentCandidate(ToolResponse tool) {
+		return isBuiltInAttachmentCandidate(tool);
+	}
+
+	public static boolean executesAsKnowledgeSearch(ToolType type, String executorRef) {
+		return type == ToolType.BUILD_IN && "knowledge.search".equals(executorRef);
 	}
 
 	public static boolean executesAsClientPendingTool(ToolType type, String executorRef) {
@@ -66,5 +79,9 @@ public final class ToolCatalogPolicies {
 		return "app.navigate".equals(executorRef)
 			|| "path.find".equals(executorRef)
 			|| "page.screenshot".equals(executorRef);
+	}
+
+	private static boolean isServerSideCatalogExecutor(String executorRef) {
+		return "knowledge.search".equals(executorRef);
 	}
 }

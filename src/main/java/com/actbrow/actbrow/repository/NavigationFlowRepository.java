@@ -14,4 +14,6 @@ public interface NavigationFlowRepository extends JpaRepository<NavigationFlowEn
 	List<NavigationFlowEntity> findAllByAssistantIdAndEnabledTrueOrderByCreatedAt(String assistantId);
 
 	Optional<NavigationFlowEntity> findByAssistantIdAndId(String assistantId, String id);
+
+	Optional<NavigationFlowEntity> findByAssistant_IdAndName(String assistantId, String name);
 }

@@ -24,6 +24,7 @@ import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.actbrow.actbrow.conversation.PageContextParser;
 import com.actbrow.actbrow.conversation.UserMessageDisplay;
 import com.actbrow.actbrow.config.ActbrowProperties;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
@@ -51,6 +52,7 @@ public class RunService {
 	private final BuiltinServerToolExecutor builtinServerToolExecutor;
 	private final HttpServerToolExecutor httpServerToolExecutor;
 	private final NavigationFlowService navigationFlowService;
+	private final KnowledgeSearchToolExecutor knowledgeSearchToolExecutor;
 	private final ActbrowProperties properties;
 	private final ObjectMapper objectMapper;
 	private final String defaultChatModel;
@@ -62,7 +64,8 @@ public class RunService {
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
 		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
 		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
-		NavigationFlowService navigationFlowService, ActbrowProperties properties, ObjectMapper objectMapper,
+		NavigationFlowService navigationFlowService, KnowledgeSearchToolExecutor knowledgeSearchToolExecutor,
+		ActbrowProperties properties, ObjectMapper objectMapper,
 		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
@@ -75,6 +78,7 @@ public class RunService {
 		this.builtinServerToolExecutor = builtinServerToolExecutor;
 		this.httpServerToolExecutor = httpServerToolExecutor;
 		this.navigationFlowService = navigationFlowService;
+		this.knowledgeSearchToolExecutor = knowledgeSearchToolExecutor;
 		this.properties = properties;
 		this.objectMapper = objectMapper;
 		this.defaultChatModel = defaultChatModel;
@@ -328,6 +332,10 @@ public class RunService {
 				return new ToolExecutionResult(false, null, message, message);
 			}
 		}
+		if (ToolCatalogPolicies.executesAsKnowledgeSearch(tool.type(), tool.executorRef())) {
+			return knowledgeSearchToolExecutor.execute(run.getAssistantId(),
+				mergeKnowledgeSearchArguments(run.getConversationId(), executionArguments));
+		}
 		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
 			return httpServerToolExecutor.execute(tool, executionArguments);
 		}
@@ -405,6 +413,34 @@ public class RunService {
 			}
 		}
 		return merged;
+	}
+
+	private Map<String, Object> mergeKnowledgeSearchArguments(String conversationId,
+		Map<String, Object> executionArguments) {
+		Map<String, Object> merged = executionArguments == null ? new LinkedHashMap<>() : new LinkedHashMap<>(executionArguments);
+		Object path = merged.get("path");
+		if (path == null || String.valueOf(path).isBlank()) {
+			String currentPath = extractPathFromConversation(conversationId);
+			if (currentPath != null) {
+				merged.put("path", currentPath);
+			}
+		}
+		return merged;
+	}
+
+	private String extractPathFromConversation(String conversationId) {
+		var messages = conversationService.listMessages(conversationId);
+		for (int index = messages.size() - 1; index >= 0; index--) {
+			var message = messages.get(index);
+			if (message.getRole() != ConversationMessageRole.USER) {
+				continue;
+			}
+			String path = PageContextParser.extractPath(message.getContent());
+			if (path != null) {
+				return path;
+			}
+		}
+		return null;
 	}
 
 	private static boolean isDedicatedClientNavigateTool(ToolDescriptor tool) {
@@ -500,15 +536,16 @@ public class RunService {
 			.append("  - path.find        Returns the user's current path, full URL, page title, query, and hash. Call this when you need to know where the user is.\n")
 			.append("  - page.screenshot  Returns a text snapshot of the current page (title + truncated DOM). Call this only to answer questions about what the user is currently looking at.\n")
 			.append("  - app.navigate     Moves the user to a path inside the host app (path or url argument). Use this to take the user somewhere; never use it as a way to read.\n")
+			.append("  - knowledge.search Search operator-configured knowledge (policies, product facts, SOPs). Use ONLY when the user needs company or product information that PAGE_CONTEXT, page.screenshot, and other tools cannot provide. Call at most once per turn. If it returns no results, say you do not have that information — do not invent it.\n")
 			.append("\n")
 			.append("Operation tools (writes, side-effects beyond navigation) appear ONLY in the function schema for this turn and ONLY if the operator attached them. Do not try to synthesize an operation by chaining observation/navigation calls.\n")
 			.append("\n")
 			.append("HARD RULES — violating these is the worst failure mode:\n")
 			.append("  1. Never call a tool that is not in the function schema for this turn. Never invent tool names, paths, URLs, or arguments that aren't supported by an attached tool's schema and defaults.\n")
 			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
-			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in the most recent page.screenshot.visibleText OR in PAGE_CONTEXT. If a detail is not literally there, do NOT include it. Do not infer, paraphrase into specifics, or fill in plausible-looking values. If the snapshot only shows the navigation bar, only describe the navigation bar — say the page body was empty/not captured rather than inventing content.\n")
+			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in the most recent page.screenshot.visibleText OR in PAGE_CONTEXT. Knowledge search results are operator-provided facts, not observed page content — use them only for policies and product rules, never to describe what is on screen.\n")
 			.append("  3. If a tool fails or times out, tell the user honestly: which tool, what failed, and that you can't see the page. Do not improvise a description. Do not retry the same tool with the same arguments.\n")
-			.append("  4. Call each observation tool (path.find, page.screenshot) AT MOST ONCE per user turn. After observation, produce a final answer.\n")
+			.append("  4. Call each observation tool (path.find, page.screenshot) AT MOST ONCE per user turn. Call knowledge.search AT MOST ONCE per user turn, and only when needed for operator-configured facts. After observation and any needed knowledge lookup, produce a final answer.\n")
 			.append("  5. NEVER call the same tool twice with the same arguments. The result will not change.\n")
 			.append("  6. If two observation calls have not given you what you need, stop calling tools. Give a final answer that says what you tried.\n")
 			.append("  7. If no action tool can fulfill the user's request, do NOT improvise. Give a final answer that politely tells the user to do it themselves. When you have real observation, reference what you saw (the current path, a section name, a button label) so the user knows where to act. When you do NOT have observation, do not invent one — just say so.\n")

@@ -48,6 +48,17 @@ public class NavigationFlowService {
 		return toResponse(navigationFlowRepository.save(entity));
 	}
 
+	public boolean upsertByName(String assistantId, NavigationFlowRequest request,
+		AssistantDefinitionEntity assistant) {
+		var existing = navigationFlowRepository.findByAssistant_IdAndName(assistantId, request.name());
+		if (existing.isPresent()) {
+			update(assistantId, existing.get().getId(), request, assistant);
+			return true;
+		}
+		create(assistantId, request, assistant);
+		return false;
+	}
+
 	public NavigationFlowResponse update(String assistantId, String flowId, NavigationFlowRequest request,
 		AssistantDefinitionEntity assistant) {
 		NavigationFlowEntity entity = navigationFlowRepository

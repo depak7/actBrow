@@ -36,14 +36,36 @@ public class AssistantService {
 		entity.setModel(resolveModel(request.model(), null));
 		entity.setUsePredefinedFlows(request.usePredefinedFlows());
 		entity.setUserId(request.userId());
+		ensureConnectKeys(entity);
 		AssistantDefinitionEntity saved = assistantRepository.save(entity);
-		toolService.attachBuiltInClientTools(saved.getId());
+		toolService.attachBuiltInTools(saved.getId());
 		return toResponse(saved);
 	}
 
 	public AssistantDefinitionEntity requireEntity(String assistantId) {
 		return assistantRepository.findById(assistantId)
 			.orElseThrow(() -> new IllegalArgumentException("Assistant not found"));
+	}
+
+	public AssistantDefinitionEntity requireOwnedEntity(String assistantId, String userId) {
+		AssistantDefinitionEntity entity = requireEntity(assistantId);
+		if (userId == null || !userId.equals(entity.getUserId())) {
+			throw new IllegalArgumentException("Assistant not found");
+		}
+		return entity;
+	}
+
+	public void ensureConnectKeys(AssistantDefinitionEntity entity) {
+		if (entity.getSetupKey() == null || entity.getSetupKey().isBlank()) {
+			entity.setSetupKey(generatePrefixedKey("sk_"));
+		}
+		if (entity.getWidgetKey() == null || entity.getWidgetKey().isBlank()) {
+			entity.setWidgetKey(generatePrefixedKey("wk_"));
+		}
+	}
+
+	public AssistantDefinitionEntity saveEntity(AssistantDefinitionEntity entity) {
+		return assistantRepository.save(entity);
 	}
 
 	public List<AssistantResponse> list() {
@@ -101,9 +123,13 @@ public class AssistantService {
 	}
 
 	private String generateApiKey() {
+		return generatePrefixedKey("ak_");
+	}
+
+	private String generatePrefixedKey(String prefix) {
 		byte[] bytes = new byte[32];
 		secureRandom.nextBytes(bytes);
-		return "ak_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+		return prefix + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
 	}
 
 	private String randomToken(int byteCount) {

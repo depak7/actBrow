@@ -2,6 +2,7 @@ package com.actbrow.actbrow.service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import org.springframework.stereotype.Component;
 
@@ -10,6 +11,30 @@ import com.actbrow.actbrow.model.ToolType;
 
 @Component
 public class BuiltinToolCatalog {
+
+	public List<ToolRequest> allBuiltInTools() {
+		return Stream.concat(builtInClientTools().stream(), builtInServerTools().stream()).toList();
+	}
+
+	public List<ToolRequest> builtInServerTools() {
+		return List.of(
+			new ToolRequest("knowledge.search", "Knowledge Search",
+				"Search operator-configured knowledge for this assistant (policies, product facts, SOPs, troubleshooting playbooks). "
+					+ "Use ONLY when the user needs company or product information that is NOT visible on the current page and NOT "
+					+ "available from other tools. Do NOT use for UI layout, buttons, labels, or page content — use page.screenshot "
+					+ "or PAGE_CONTEXT for that. If no results are returned, tell the user you do not have that information; do not invent it.",
+				Map.of(
+					"type", "object",
+					"properties", Map.of(
+						"query", Map.of(
+							"type", "string",
+							"description", "What to search for in the knowledge base"),
+						"path", Map.of(
+							"type", "string",
+							"description", "Optional current page path (e.g. /settings/billing) to prefer route-relevant documents")),
+					"required", List.of("query")),
+				null, ToolType.BUILD_IN, "1", true, "knowledge.search", Map.of(), Map.of()));
+	}
 
 	public List<ToolRequest> builtInClientTools() {
 		return List.of(
