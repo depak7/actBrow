@@ -49,11 +49,6 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 	}
 
 	@Override
-	public String providerKey() {
-		return "openai-compatible";
-	}
-
-	@Override
 	public ModelDecision decideNextStep(String model, String systemPrompt, List<ConversationMessageEntity> messages,
 		List<ToolDescriptor> tools, int stepIndex) {
 
