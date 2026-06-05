@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.actbrow.actbrow.api.dto.ConversationMessageResponse;
 import com.actbrow.actbrow.api.dto.ConversationRequest;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
+import com.actbrow.actbrow.api.dto.ConversationSummaryResponse;
 import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.actbrow.actbrow.conversation.UserMessageDisplay;
@@ -46,6 +47,16 @@ public class ConversationController {
 			throw new IllegalArgumentException("Widget key is not authorized for this assistant");
 		}
 		return conversationService.create(request);
+	}
+
+	@GetMapping
+	public List<ConversationSummaryResponse> list(
+		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String userId) {
+		if (!"account".equals(authType) || userId == null || userId.isBlank()) {
+			throw new IllegalArgumentException("Account API key is required to list conversations");
+		}
+		return conversationService.listForUser(userId);
 	}
 
 	@PostMapping("/{conversationId}/turns")

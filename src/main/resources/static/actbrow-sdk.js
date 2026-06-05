@@ -878,7 +878,10 @@
         headers: headers
       };
       if (method !== "GET" && method !== "HEAD") {
-        init.body = JSON.stringify(payload.arguments || {});
+        // Prefer the server-shaped body (path/query params already lifted out for
+        // OpenAPI-generated tools); fall back to the raw arguments for legacy HTTP tools.
+        var requestBody = (http.body !== undefined && http.body !== null) ? http.body : (payload.arguments || {});
+        init.body = JSON.stringify(requestBody);
       }
 
       debugLog(config, "executing browser http tool", method, target.toString());
@@ -1172,10 +1175,10 @@
     injectStyles([
       "/* ===== ActBrow Widget - Transparent Glassmorphism UI ===== */",
       "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');",
-      ".actbrow-widget-root{position:fixed;right:24px;bottom:24px;z-index:2147483000;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;}",
+      ".actbrow-widget-root{position:fixed;inset:0;z-index:2147483000;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;pointer-events:none;}",
       
       "/* Launcher Button - Solid Color */",
-      ".actbrow-widget-launcher{position:relative;width:56px;height:56px;border:none;border-radius:999px;background:#1a1a1a;color:#fff;font-weight:600;font-size:13px;letter-spacing:.02em;cursor:pointer;box-shadow:0 8px 32px rgba(0,0,0,.2);transition:all .3s cubic-bezier(.4,0,.2,1);outline:none;overflow:hidden;border:1px solid rgba(0,0,0,.15);}",
+      ".actbrow-widget-launcher{position:fixed;right:24px;bottom:24px;pointer-events:auto;z-index:2147483002;width:56px;height:56px;border:none;border-radius:999px;background:#1a1a1a;color:#fff;font-weight:600;font-size:13px;letter-spacing:.02em;cursor:pointer;box-shadow:0 8px 32px rgba(0,0,0,.2);transition:all .3s cubic-bezier(.4,0,.2,1);outline:none;overflow:hidden;border:1px solid rgba(0,0,0,.15);}",
       ".actbrow-widget-launcher:hover{transform:translateY(-3px) scale(1.02);background:#222;box-shadow:0 16px 48px rgba(0,0,0,.25);}",
       ".actbrow-widget-launcher:active{transform:translateY(-1px) scale(.98);box-shadow:0 8px 24px rgba(0,0,0,.2);}",
       ".actbrow-widget-launcher:focus-visible{box-shadow:0 0 0 4px rgba(0,0,0,.15),0 8px 32px rgba(0,0,0,.2);}",
@@ -1185,12 +1188,19 @@
       ".actbrow-widget-launcher-icon svg{width:24px;height:24px;fill:currentColor;filter:drop-shadow(0 2px 4px rgba(0,0,0,.2));}",
       
       "/* Chat Panel - Dark Theme matching actbrow UI */",
-      ".actbrow-widget-panel{position:absolute;right:0;bottom:88px;width:340px;max-width:calc(100vw - 48px);height:480px;max-height:calc(100vh - 120px);display:flex;flex-direction:column;border-radius:20px;overflow:hidden;background:linear-gradient(180deg,#1a1a2e 0%,#0f0f1a 100%);border:1px solid rgba(255,255,255,.1);box-shadow:0 32px 96px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.2);transition:all .3s cubic-bezier(.4,0,.2,1);transform-origin:bottom right;}",
+      ".actbrow-widget-panel{position:fixed;pointer-events:auto;z-index:2147483001;width:340px;max-width:480px;max-height:640px;height:480px;min-width:280px;min-height:320px;display:flex;flex-direction:column;border-radius:20px;overflow:hidden;background:linear-gradient(180deg,#1a1a2e 0%,#0f0f1a 100%);border:1px solid rgba(255,255,255,.1);box-shadow:0 32px 96px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.2);transition:opacity .3s cubic-bezier(.4,0,.2,1),transform .3s cubic-bezier(.4,0,.2,1);transform-origin:center bottom;}",
       ".actbrow-widget-panel.actbrow-widget-hidden{opacity:0;transform:scale(.92) translateY(12px);pointer-events:none;}",
       ".actbrow-widget-panel:not(.actbrow-widget-hidden){opacity:1;transform:scale(1) translateY(0);}",
+      ".actbrow-widget-panel.actbrow-widget-dragging,.actbrow-widget-panel.actbrow-widget-resizing{transition:none;user-select:none;}",
+      ".actbrow-widget-resize-handle{position:absolute;width:18px;height:18px;z-index:3;touch-action:none;}",
+      ".actbrow-widget-resize-handle-tl{top:0;left:0;cursor:nwse-resize;border-radius:20px 0 12px 0;background:linear-gradient(135deg,rgba(255,255,255,.12) 0%,transparent 55%);}",
+      ".actbrow-widget-resize-handle-tl::after{content:'';position:absolute;top:5px;left:5px;width:8px;height:8px;border-top:2px solid rgba(255,255,255,.35);border-left:2px solid rgba(255,255,255,.35);border-radius:2px 0 0 0;}",
+      ".actbrow-widget-resize-handle-br{bottom:0;right:0;cursor:nwse-resize;border-radius:0 0 20px 0;background:linear-gradient(315deg,rgba(255,255,255,.12) 0%,transparent 55%);}",
+      ".actbrow-widget-resize-handle-br::after{content:'';position:absolute;bottom:5px;right:5px;width:8px;height:8px;border-bottom:2px solid rgba(255,255,255,.35);border-right:2px solid rgba(255,255,255,.35);border-radius:0 0 2px 0;}",
 
       "/* Header - Dark gradient */",
-      ".actbrow-widget-header{padding:14px 14px 12px;background:linear-gradient(180deg,rgba(255,255,255,.08) 0%,transparent 100%);color:#e5e5e5;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;border-bottom:1px solid rgba(255,255,255,.08);position:relative;}",
+      ".actbrow-widget-header{padding:14px 14px 12px;background:linear-gradient(180deg,rgba(255,255,255,.08) 0%,transparent 100%);color:#e5e5e5;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;border-bottom:1px solid rgba(255,255,255,.08);position:relative;cursor:grab;touch-action:none;}",
+      ".actbrow-widget-panel.actbrow-widget-dragging .actbrow-widget-header{cursor:grabbing;}",
       ".actbrow-widget-header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.06) 50%,transparent 100%);}",
       ".actbrow-widget-header-content{flex:1;min-width:0;}",
       ".actbrow-widget-title{font-size:13px;font-weight:700;letter-spacing:-.02em;color:#e5e5e5;margin-bottom:3px;display:flex;align-items:center;gap:7px;font-family:'Inter',sans-serif;}",
@@ -1200,7 +1210,7 @@
       ".actbrow-widget-badge{display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:3px 8px;background:rgba(34,197,94,.15);border-radius:999px;border:1px solid rgba(34,197,94,.3);}",
       ".actbrow-widget-badge-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2);animation:actbrow-badge-pulse 2s ease-in-out infinite;}",
       ".actbrow-widget-badge-text{font-size:9px;font-weight:600;color:#4ade80;letter-spacing:.02em;}",
-      ".actbrow-widget-header-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;}",
+      ".actbrow-widget-header-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;cursor:default;}",
       ".actbrow-widget-clear-history{border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(255,255,255,.06);color:#b0b0b0;font-size:11px;font-weight:600;letter-spacing:.02em;cursor:pointer;padding:6px 10px;line-height:1.2;transition:all .2s ease;font-family:'Inter',sans-serif;white-space:nowrap;}",
       ".actbrow-widget-clear-history:hover{background:rgba(255,255,255,.1);color:#e5e5e5;border-color:rgba(255,255,255,.18);}",
       ".actbrow-widget-clear-history:active{transform:scale(.98);}",
@@ -1298,9 +1308,9 @@
       
       "/* Input Form */",
       ".actbrow-widget-form-wrap{padding:0;background:transparent;}",
-      ".actbrow-widget-form{display:flex;gap:6px;padding:5px;border:1px solid rgba(255,255,255,.15);border-radius:16px;background:#2a2a2a;box-shadow:0 2px 6px rgba(0,0,0,.2);transition:all .2s ease;}",
+      ".actbrow-widget-form{display:flex;gap:6px;padding:5px;border:1px solid rgba(255,255,255,.15);border-radius:16px;background:#2a2a2a;box-shadow:0 2px 6px rgba(0,0,0,.2);transition:all .2s ease;align-items:flex-end;}",
       ".actbrow-widget-form:focus-within{border-color:rgba(255,255,255,.3);box-shadow:0 3px 12px rgba(0,0,0,.3),0 0 0 3px rgba(255,255,255,.08);}",
-      ".actbrow-widget-input{flex:1;border:none;background:#3a3a3a;padding:9px 12px;font-size:13px;color:#fff;outline:none;font-family:'Inter',sans-serif;border-radius:12px;}",
+      ".actbrow-widget-input{flex:1;border:none;background:#3a3a3a;padding:9px 12px;font-size:13px;color:#fff;outline:none;font-family:'Inter',sans-serif;border-radius:12px;resize:none;overflow-y:auto;min-height:38px;max-height:160px;line-height:1.45;field-sizing:content;}",
       ".actbrow-widget-input::placeholder{color:#888;}",
       ".actbrow-widget-input:focus{background:#404040;}",
       ".actbrow-widget-send{border:none;border-radius:14px;background:#fff;color:#000;padding:0 16px;font-weight:600;cursor:pointer;min-width:50px;height:38px;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .2s ease;font-family:'Inter',sans-serif;}",
@@ -1314,7 +1324,7 @@
       "@keyframes actbrow-badge-pulse{0%,100%{box-shadow:0 0 0 4px rgba(34,197,94,.15);}50%{box-shadow:0 0 0 8px rgba(34,197,94,.08);}}",
       
       "/* Responsive Design */",
-      "@media (max-width:640px){.actbrow-widget-root{right:12px;left:12px;bottom:12px;}.actbrow-widget-panel{width:calc(100% - 24px) !important;left:12px !important;right:12px !important;bottom:80px;height:65vh;max-height:calc(100vh - 100px);border-radius:16px;}.actbrow-widget-launcher{width:52px;height:52px;margin-left:auto;display:block;}.actbrow-widget-message{max-width:90%;}.actbrow-widget-steps{max-width:96%;width:96%;}}",
+      "@media (max-width:640px){.actbrow-widget-launcher{right:12px;bottom:12px;width:52px;height:52px;}.actbrow-widget-panel{max-width:calc(100vw - 24px) !important;max-height:min(640px,calc(100vh - 24px)) !important;border-radius:16px;}.actbrow-widget-message{max-width:90%;}.actbrow-widget-steps{max-width:96%;width:96%;}}",
       
       "/* Reduced Motion */",
       "@media (prefers-reduced-motion:reduce){.actbrow-widget-launcher,.actbrow-widget-panel,.actbrow-widget-row,.actbrow-widget-close,.actbrow-widget-suggestion,.actbrow-widget-send{transition:none;animation:none;}.actbrow-widget-thinking-dot{animation:none;}}",
@@ -1348,6 +1358,18 @@
     panel.setAttribute("aria-label", labels.title || "ActBrow Assistant");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
+
+    var resizeHandleTopLeft = document.createElement("div");
+    resizeHandleTopLeft.className = "actbrow-widget-resize-handle actbrow-widget-resize-handle-tl";
+    resizeHandleTopLeft.setAttribute("aria-label", labels.resizePanel || "Resize chat panel");
+    resizeHandleTopLeft.setAttribute("role", "separator");
+    panel.appendChild(resizeHandleTopLeft);
+
+    var resizeHandleBottomRight = document.createElement("div");
+    resizeHandleBottomRight.className = "actbrow-widget-resize-handle actbrow-widget-resize-handle-br";
+    resizeHandleBottomRight.setAttribute("aria-label", labels.resizePanel || "Resize chat panel");
+    resizeHandleBottomRight.setAttribute("role", "separator");
+    panel.appendChild(resizeHandleBottomRight);
 
     var header = document.createElement("div");
     header.className = "actbrow-widget-header";
@@ -1397,11 +1419,29 @@
     var form = document.createElement("form");
     form.className = "actbrow-widget-form";
 
-    var input = document.createElement("input");
+    var input = document.createElement("textarea");
     input.className = "actbrow-widget-input";
-    input.type = "text";
+    input.rows = 1;
     input.placeholder = labels.placeholder || "Ask me to navigate or help with what's on this page";
     input.setAttribute("aria-label", "Message input");
+    var maxInputHeight = 160;
+
+    function resizeInput() {
+      input.style.height = "auto";
+      var nextHeight = Math.min(input.scrollHeight, maxInputHeight);
+      input.style.height = nextHeight + "px";
+    }
+
+    input.addEventListener("input", resizeInput);
+    input.addEventListener("paste", function () {
+      setTimeout(resizeInput, 0);
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
 
     var send = document.createElement("button");
     send.className = "actbrow-widget-send";
@@ -1421,8 +1461,8 @@
     footer.appendChild(poweredBy);
     panel.appendChild(body);
     panel.appendChild(footer);
-    root.appendChild(panel);
     root.appendChild(launcher);
+    root.appendChild(panel);
 
     (config.mount || document.body).appendChild(root);
 
@@ -1446,34 +1486,34 @@
     var hasSubmittedMessage = false;
     var panelHydrated = false;
 
-    global.__actbrowWidgetElements = { root: root, launcher: launcher };
+    global.__actbrowWidgetElements = { root: root, launcher: launcher, panel: panel };
+
+    function ensureWidgetMounted() {
+      var stored = global.__actbrowWidgetElements;
+      if (!stored || !stored.root) {
+        return;
+      }
+      if (!document.body.contains(stored.root)) {
+        config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
+      }
+      if (stored.launcher && !stored.root.contains(stored.launcher)) {
+        stored.root.appendChild(stored.launcher);
+      }
+      if (stored.panel && !stored.root.contains(stored.panel)) {
+        stored.root.appendChild(stored.panel);
+      }
+    }
 
     if (typeof window !== "undefined") {
       window.addEventListener("popstate", function() {
         setTimeout(function() {
-          var stored = global.__actbrowWidgetElements;
-          if (stored && stored.root && stored.launcher) {
-            if (!document.body.contains(stored.root)) {
-              config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
-            }
-            if (!document.body.contains(stored.launcher)) {
-              config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
-            }
-          }
+          ensureWidgetMounted();
           // Reconnect any in-progress run SSE stream after SPA navigation
           client.syncRunFromStorage();
         }, 100);
       });
       window.addEventListener("pageshow", function (event) {
-        var stored = global.__actbrowWidgetElements;
-        if (stored && stored.root && stored.launcher) {
-          if (!document.body.contains(stored.root)) {
-            config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
-          }
-          if (!document.body.contains(stored.launcher)) {
-            config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
-          }
-        }
+        ensureWidgetMounted();
         if (event.persisted) {
           client.syncConversationIdFromStorage();
           client.syncRunFromStorage();
@@ -1481,15 +1521,7 @@
         }
       });
       setTimeout(function() {
-        var stored = global.__actbrowWidgetElements;
-        if (stored && stored.root && stored.launcher) {
-          if (!document.body.contains(stored.root)) {
-            config.mount ? config.mount.appendChild(stored.root) : document.body.appendChild(stored.root);
-          }
-          if (!document.body.contains(stored.launcher)) {
-            config.mount ? config.mount.appendChild(stored.launcher) : document.body.appendChild(stored.launcher);
-          }
-        }
+        ensureWidgetMounted();
       }, 1000);
     }
 
@@ -1625,6 +1657,15 @@
         }
         button.textContent = optionText;
         button.addEventListener("click", function () {
+          if (button.disabled) {
+            return;
+          }
+          var siblings = options.querySelectorAll(".actbrow-widget-message-option");
+          siblings.forEach(function (node) {
+            node.disabled = true;
+            node.style.opacity = "0.55";
+            node.style.cursor = "default";
+          });
           openPanel();
           submitPrompt(optionText);
         });
@@ -1812,6 +1853,8 @@
       }
       appendMessage("user", text);
       input.value = "";
+      input.style.height = "auto";
+      resizeInput();
       setSendingState(true);
       ensureThinkingRow();
       setStatus(labels.statusThinking || "Thinking...");
@@ -1986,6 +2029,235 @@
       launcher.focus();
     }
 
+    var panelLayoutStorageKey = "actbrow-widget-layout-" + (config.assistantId || "default");
+    var panelLegacySizeStorageKey = "actbrow-widget-size-" + (config.assistantId || "default");
+    var panelMargin = 12;
+    var launcherGap = 88;
+    var maxPanelWidth = 480;
+    var maxPanelHeight = 640;
+
+    function clampPanelSize(width, height) {
+      var minW = 280;
+      var minH = 320;
+      var maxW = Math.min(maxPanelWidth, Math.max(minW, window.innerWidth - panelMargin * 2));
+      var maxH = Math.min(maxPanelHeight, Math.max(minH, window.innerHeight - panelMargin * 2));
+      return {
+        width: Math.min(maxW, Math.max(minW, width)),
+        height: Math.min(maxH, Math.max(minH, height))
+      };
+    }
+
+    function clampPanelPosition(left, top, width, height) {
+      var maxLeft = Math.max(panelMargin, window.innerWidth - width - panelMargin);
+      var maxTop = Math.max(panelMargin, window.innerHeight - height - panelMargin);
+      return {
+        left: Math.min(maxLeft, Math.max(panelMargin, left)),
+        top: Math.min(maxTop, Math.max(panelMargin, top))
+      };
+    }
+
+    function defaultPanelLayout() {
+      var size = clampPanelSize(340, 480);
+      var left = window.innerWidth - size.width - 24;
+      var top = window.innerHeight - size.height - launcherGap - 24;
+      return {
+        left: left,
+        top: top,
+        width: size.width,
+        height: size.height
+      };
+    }
+
+    function applyPanelLayout(layout) {
+      var size = clampPanelSize(layout.width, layout.height);
+      var pos = clampPanelPosition(layout.left, layout.top, size.width, size.height);
+      panel.style.width = size.width + "px";
+      panel.style.height = size.height + "px";
+      panel.style.left = pos.left + "px";
+      panel.style.top = pos.top + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      return {
+        left: pos.left,
+        top: pos.top,
+        width: size.width,
+        height: size.height
+      };
+    }
+
+    function readPanelLayout() {
+      var left = parseFloat(panel.style.left);
+      var top = parseFloat(panel.style.top);
+      if (isNaN(left) || isNaN(top)) {
+        return defaultPanelLayout();
+      }
+      return {
+        left: left,
+        top: top,
+        width: panel.offsetWidth,
+        height: panel.offsetHeight
+      };
+    }
+
+    function savePanelLayout() {
+      try {
+        var layout = applyPanelLayout(readPanelLayout());
+        global.localStorage.setItem(panelLayoutStorageKey, JSON.stringify(layout));
+      } catch (e) {
+        // ignore storage failures
+      }
+    }
+
+    function loadPanelLayout() {
+      try {
+        var raw = global.localStorage.getItem(panelLayoutStorageKey);
+        if (raw) {
+          var parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.width === "number" && typeof parsed.height === "number") {
+            return applyPanelLayout({
+              left: typeof parsed.left === "number" ? parsed.left : defaultPanelLayout().left,
+              top: typeof parsed.top === "number" ? parsed.top : defaultPanelLayout().top,
+              width: parsed.width,
+              height: parsed.height
+            });
+          }
+        }
+        var legacyRaw = global.localStorage.getItem(panelLegacySizeStorageKey);
+        if (legacyRaw) {
+          var legacy = JSON.parse(legacyRaw);
+          if (legacy && typeof legacy.width === "number" && typeof legacy.height === "number") {
+            var defaults = defaultPanelLayout();
+            return applyPanelLayout({
+              left: defaults.left,
+              top: defaults.top,
+              width: legacy.width,
+              height: legacy.height
+            });
+          }
+        }
+      } catch (e) {
+        // fall through to defaults
+      }
+      return applyPanelLayout(defaultPanelLayout());
+    }
+
+    function bindPointerDrag(startEvent, onMove, onEnd) {
+      startEvent.preventDefault();
+      function onPointerMove(moveEvent) {
+        onMove(moveEvent);
+      }
+      function onPointerUp() {
+        document.removeEventListener("mousemove", onPointerMove);
+        document.removeEventListener("mouseup", onPointerUp);
+        document.removeEventListener("touchmove", onPointerMove);
+        document.removeEventListener("touchend", onPointerUp);
+        document.removeEventListener("touchcancel", onPointerUp);
+        if (typeof onEnd === "function") {
+          onEnd();
+        }
+      }
+      document.addEventListener("mousemove", onPointerMove);
+      document.addEventListener("mouseup", onPointerUp);
+      document.addEventListener("touchmove", onPointerMove, { passive: false });
+      document.addEventListener("touchend", onPointerUp);
+      document.addEventListener("touchcancel", onPointerUp);
+    }
+
+    function pointerClientXY(event) {
+      if (event.touches && event.touches.length) {
+        return { x: event.touches[0].clientX, y: event.touches[0].clientY };
+      }
+      return { x: event.clientX, y: event.clientY };
+    }
+
+    function startPanelDrag(startEvent) {
+      if (startEvent.button != null && startEvent.button !== 0) {
+        return;
+      }
+      if (startEvent.target && startEvent.target.closest && startEvent.target.closest("button")) {
+        return;
+      }
+      panel.classList.add("actbrow-widget-dragging");
+      var rect = panel.getBoundingClientRect();
+      var start = pointerClientXY(startEvent);
+      var offsetX = start.x - rect.left;
+      var offsetY = start.y - rect.top;
+      bindPointerDrag(startEvent, function (moveEvent) {
+        var point = pointerClientXY(moveEvent);
+        applyPanelLayout({
+          left: point.x - offsetX,
+          top: point.y - offsetY,
+          width: panel.offsetWidth,
+          height: panel.offsetHeight
+        });
+      }, function () {
+        panel.classList.remove("actbrow-widget-dragging");
+        savePanelLayout();
+      });
+    }
+
+    function startPanelResize(startEvent, corner) {
+      if (startEvent.button != null && startEvent.button !== 0) {
+        return;
+      }
+      panel.classList.add("actbrow-widget-resizing");
+      var start = pointerClientXY(startEvent);
+      var layout = readPanelLayout();
+      var startLeft = layout.left;
+      var startTop = layout.top;
+      var startWidth = layout.width;
+      var startHeight = layout.height;
+      bindPointerDrag(startEvent, function (moveEvent) {
+        var point = pointerClientXY(moveEvent);
+        if (corner === "tl") {
+          var nextWidth = startWidth + (start.x - point.x);
+          var nextHeight = startHeight + (start.y - point.y);
+          var size = clampPanelSize(nextWidth, nextHeight);
+          applyPanelLayout({
+            left: startLeft + (startWidth - size.width),
+            top: startTop + (startHeight - size.height),
+            width: size.width,
+            height: size.height
+          });
+        } else {
+          applyPanelLayout({
+            left: startLeft,
+            top: startTop,
+            width: startWidth + (point.x - start.x),
+            height: startHeight + (point.y - start.y)
+          });
+        }
+      }, function () {
+        panel.classList.remove("actbrow-widget-resizing");
+        savePanelLayout();
+      });
+    }
+
+    loadPanelLayout();
+
+    header.addEventListener("mousedown", startPanelDrag);
+    header.addEventListener("touchstart", startPanelDrag, { passive: false });
+
+    resizeHandleTopLeft.addEventListener("mousedown", function (event) {
+      startPanelResize(event, "tl");
+    });
+    resizeHandleTopLeft.addEventListener("touchstart", function (event) {
+      startPanelResize(event, "tl");
+    }, { passive: false });
+
+    resizeHandleBottomRight.addEventListener("mousedown", function (event) {
+      startPanelResize(event, "br");
+    });
+    resizeHandleBottomRight.addEventListener("touchstart", function (event) {
+      startPanelResize(event, "br");
+    }, { passive: false });
+
+    window.addEventListener("resize", function () {
+      applyPanelLayout(readPanelLayout());
+    });
+
+    resizeInput();
+
     // Keyboard accessibility - Escape to close
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && isOpen) {
@@ -2073,7 +2345,7 @@
   }
 
   global.Actbrow = {
-    SDK_VERSION: "3",
+    SDK_VERSION: "6",
     createActbrowClient: createActbrowClient,
     createActbrowWidget: createActbrowWidget
   };

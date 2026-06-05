@@ -34,13 +34,15 @@ public class HttpServerToolExecutor {
 		try {
 			String baseUrl = extractBaseUrl(tool);
 			String method = extractMethod(tool);
-			String path = extractPath(tool);
-			Map<String, String> headers = extractHeaders(tool);
-			Object body = buildBody(tool, arguments);
+			String pathTemplate = extractPath(tool);
+			HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(pathTemplate,
+				tool.metadata().get("parameters"), arguments);
+			String path = shaped.path();
 
 			HttpHeaders httpHeaders = new HttpHeaders();
 			httpHeaders.setContentType(MediaType.APPLICATION_JSON);
-			headers.forEach(httpHeaders::set);
+			extractHeaders(tool).forEach(httpHeaders::set);
+			shaped.headers().forEach(httpHeaders::set);
 
 			HttpMethod httpMethod = HttpMethod.valueOf(method);
 			HttpEntity<?> entity;
@@ -48,7 +50,7 @@ public class HttpServerToolExecutor {
 				entity = new HttpEntity<>(httpHeaders);
 			}
 			else {
-				entity = new HttpEntity<>(body, httpHeaders);
+				entity = new HttpEntity<>(shaped.body(), httpHeaders);
 			}
 
 			String response;
@@ -92,13 +94,5 @@ public class HttpServerToolExecutor {
 			return (Map<String, String>) headers;
 		}
 		return Map.of();
-	}
-
-	private Object buildBody(ToolDescriptor tool, Map<String, Object> arguments) {
-		String method = extractMethod(tool);
-		if ("GET".equals(method) || "HEAD".equals(method)) {
-			return null;
-		}
-		return arguments;
 	}
 }

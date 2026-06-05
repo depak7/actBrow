@@ -143,6 +143,10 @@ public class ApiKeyAuthFilter implements WebFilter {
 		if ("GET".equalsIgnoreCase(method) && "/health".equals(path)) {
 			return true;
 		}
+		// Internal Claude CLI proxy — called by Spring AI on loopback, no user key needed
+		if (segmentsMatch(path, "/claude")) {
+			return true;
+		}
 		if (segmentsMatch(path, "/v1/waitlist")) {
 			return true;
 		}

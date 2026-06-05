@@ -78,6 +78,10 @@ public class AssistantService {
 			.toList();
 	}
 
+	public List<AssistantDefinitionEntity> listEntitiesByUser(String userId) {
+		return assistantRepository.findAllByUserId(userId);
+	}
+
 	public AssistantResponse update(String id, CreateAssistantRequest request) {
 		AssistantDefinitionEntity entity = requireEntity(id);
 		entity.setName(request.name());

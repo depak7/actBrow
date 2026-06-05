@@ -9,6 +9,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
@@ -40,6 +43,11 @@ import com.actbrow.actbrow.repository.RunStepRepository;
 
 @Service
 public class RunService {
+
+	private static final Logger log = LoggerFactory.getLogger(RunService.class);
+
+	@Value("${spring.ai.openai.chat.options.model}")
+	private String model;
 
 	private final RunRepository runRepository;
 	private final RunStepRepository runStepRepository;
@@ -179,6 +187,7 @@ public class RunService {
 			AssistantDefinitionEntity assistant = assistantService.requireEntity(run.getAssistantId());
 			List<ToolDescriptor> tools = toolService.listDescriptorsForAssistant(assistant.getId());
 			String systemPrompt = buildSystemPrompt(assistant, run.getConversationId());
+			boolean navigatedThisRun = false;
 
 			for (int stepIndex = 0; stepIndex < properties.maxSteps(); stepIndex++) {
 				if (cancelledRuns.contains(runId)) {
@@ -189,7 +198,7 @@ public class RunService {
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
 
-				String chatModel = assistant.getModel();
+				String chatModel = model;
 				if (chatModel == null || chatModel.isBlank()) {
 					chatModel = defaultChatModel;
 				}
@@ -239,20 +248,32 @@ public class RunService {
 						.orElseThrow(() -> new IllegalArgumentException("Unknown tool requested by model: " + toolCall.toolKey()));
 					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
 					String executorKey = resolveExecutorKey(tool);
-					Map<String, Object> requestedPayload = new LinkedHashMap<>();
-					requestedPayload.put("toolCallId", toolCall.toolCallId());
-					requestedPayload.put("toolId", tool.id());
-					requestedPayload.put("toolKey", tool.key());
-					requestedPayload.put("executorKey", executorKey);
-					requestedPayload.put("type", wireToolTypeForClients(tool));
-					requestedPayload.put("arguments", executionArguments);
-					if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
-						requestedPayload.put("http", browserHttpPayload(tool));
-					}
-					eventBroker.emit(runId, "tool.call.requested", requestedPayload);
-					recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
+					boolean deferNavigation = navigatedThisRun && isNavigateTool(tool);
 
-					ToolExecutionResult result = executeTool(run, toolCall, tool, executionArguments);
+					ToolExecutionResult result;
+					if (deferNavigation) {
+						recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [deferred]");
+						result = navigationDeferredResult(tool.key());
+					}
+					else {
+						Map<String, Object> requestedPayload = new LinkedHashMap<>();
+						requestedPayload.put("toolCallId", toolCall.toolCallId());
+						requestedPayload.put("toolId", tool.id());
+						requestedPayload.put("toolKey", tool.key());
+						requestedPayload.put("executorKey", executorKey);
+						requestedPayload.put("type", wireToolTypeForClients(tool));
+						requestedPayload.put("arguments", executionArguments);
+						if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
+							requestedPayload.put("http", browserHttpPayload(tool, executionArguments));
+						}
+						eventBroker.emit(runId, "tool.call.requested", requestedPayload);
+						recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
+
+						result = executeTool(run, toolCall, tool, executionArguments);
+						if (result.success() && isNavigateTool(tool)) {
+							navigatedThisRun = true;
+						}
+					}
 					String toolMessage = toolResultContentForModel(result);
 					// Store TOOL message with its toolCallId so providers can pair it with the ASSISTANT entry
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
@@ -279,7 +300,7 @@ public class RunService {
 				// Exception surfaced from a cancelled run — swallow to avoid writing to a deleted row.
 				return;
 			}
-			failRun(run, exception.getMessage());
+			failRun(run, exception.getMessage(), exception);
 		}
 		finally {
 			startedRuns.remove(runId);
@@ -333,6 +354,8 @@ public class RunService {
 			}
 		}
 		if (ToolCatalogPolicies.executesAsKnowledgeSearch(tool.type(), tool.executorRef())) {
+			log.info("LLM requested knowledge.search runId={} conversationId={} assistantId={} arguments={}",
+				run.getId(), run.getConversationId(), run.getAssistantId(), executionArguments);
 			return knowledgeSearchToolExecutor.execute(run.getAssistantId(),
 				mergeKnowledgeSearchArguments(run.getConversationId(), executionArguments));
 		}
@@ -371,13 +394,27 @@ public class RunService {
 		return tool.type().name();
 	}
 
-	private static Map<String, Object> browserHttpPayload(ToolDescriptor tool) {
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> browserHttpPayload(ToolDescriptor tool,
+		Map<String, Object> executionArguments) {
 		Map<String, Object> metadata = tool.metadata() == null ? Map.of() : tool.metadata();
+		String pathTemplate = String.valueOf(metadata.getOrDefault("path", "/"));
+		HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(pathTemplate,
+			metadata.get("parameters"), executionArguments);
+
+		Map<String, Object> headers = new LinkedHashMap<>();
+		Object metadataHeaders = metadata.get("headers");
+		if (metadataHeaders instanceof Map) {
+			headers.putAll((Map<String, Object>) metadataHeaders);
+		}
+		shaped.headers().forEach(headers::put);
+
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("method", metadata.getOrDefault("method", "GET"));
 		payload.put("baseUrl", metadata.getOrDefault("baseUrl", ""));
-		payload.put("path", metadata.getOrDefault("path", "/"));
-		payload.put("headers", metadata.getOrDefault("headers", Map.of()));
+		payload.put("path", shaped.path());
+		payload.put("headers", headers);
+		payload.put("body", shaped.body());
 		payload.put("credentials", metadata.getOrDefault("credentials", "include"));
 		payload.put("allowCrossOrigin", metadata.getOrDefault("allowCrossOrigin", false));
 		return payload;
@@ -443,6 +480,23 @@ public class RunService {
 		return null;
 	}
 
+	private static boolean isNavigateTool(ToolDescriptor tool) {
+		String executorRef = tool.executorRef();
+		String key = tool.key();
+		if ("app.navigate".equals(executorRef)) {
+			return true;
+		}
+		return executorRef == null || executorRef.isBlank() ? "app.navigate".equals(key) : false;
+	}
+
+	private static ToolExecutionResult navigationDeferredResult(String toolKey) {
+		String message = "Navigation via " + toolKey + " was not performed. You already moved the user once this turn. "
+			+ "Stop calling navigation tools. Give a final answer that names the page they are on, briefly explains "
+			+ "what they can do here, and previews the next step (e.g. \"Next I'll take you to …\"). "
+			+ "Wait for the user's next message before navigating again.";
+		return new ToolExecutionResult(false, null, message, message);
+	}
+
 	private static boolean isDedicatedClientNavigateTool(ToolDescriptor tool) {
 		if (!ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())) {
 			return false;
@@ -483,11 +537,20 @@ public class RunService {
 	}
 
 	private void failRun(RunEntity run, String error) {
+		failRun(run, error, null);
+	}
+
+	private void failRun(RunEntity run, String error, Throwable cause) {
+		if (cause != null) {
+			log.error("Run {} failed: {}", run.getId(), error, cause);
+		}
+		else {
+			log.error("Run {} failed: {}", run.getId(), error);
+		}
 		run.setStatus(RunStatus.FAILED);
-		run.setLastError(error);
 		run.setCompletedAt(Instant.now());
 		runRepository.save(run);
-		eventBroker.emit(run.getId(), "run.failed", Map.of("message", error));
+		eventBroker.emit(run.getId(), "run.failed", Map.of("message", error != null ? error : "Run failed"));
 		eventBroker.complete(run.getId());
 	}
 
@@ -551,6 +614,17 @@ public class RunService {
 			.append("  7. If no action tool can fulfill the user's request, do NOT improvise. Give a final answer that politely tells the user to do it themselves. When you have real observation, reference what you saw (the current path, a section name, a button label) so the user knows where to act. When you do NOT have observation, do not invent one — just say so.\n")
 			.append("  8. If the user's request is unclear, ask one focused clarifying question instead of guessing.\n")
 			.append("\n")
+			.append("GUIDED WALKTHROUGHS (multi-step tours, onboarding, requests with \"then\"/\"next\", numbered steps, or navigation flows):\n")
+			.append("  - When the user asks for several things in sequence, guide them one step at a time — not a silent tour of every page.\n")
+			.append("  - Perform at most ONE navigation (app.navigate or a dedicated nav tool) per user message. Reading data (HTTP tools, page.screenshot) for the current step is fine in the same turn.\n")
+			.append("  - After that navigation (or after finishing the current step's reads), STOP with a final answer: name the page, say what the user can do here, and preview the next step.\n")
+			.append("  - End every walkthrough pause with clickable options using this exact format (on their own lines at the end):\n")
+			.append("    OPTIONS: Continue to [next step] | Skip tour | Stay here\n")
+			.append("    RECOMMENDED: Continue to [next step]\n")
+			.append("    Use 2–4 short, action-oriented labels. When the tour is finished, omit OPTIONS or offer only relevant follow-ups.\n")
+			.append("  - Do NOT chain multiple navigations in one turn. Do NOT visit every page and summarize only at the end.\n")
+			.append("  - When the user clicks an option or sends its text, perform the next step only.\n")
+			.append("\n")
 			.append("In every turn, the cheapest correct outcome is a final answer. Tool calls are only justified when they unlock a final answer you could not otherwise give.\n\n");
 
 		if (assistant.isUsePredefinedFlows()) {
@@ -558,7 +632,7 @@ public class RunService {
 				var flows = navigationFlowService.listEnabledFlows(assistant.getId());
 				if (!flows.isEmpty()) {
 					prompt.append("NAVIGATION FLOWS AVAILABLE:\n");
-					prompt.append("When the user request matches a flow's trigger phrase, follow the defined steps in order.\n\n");
+					prompt.append("When the user request matches a flow's trigger phrase, follow the defined steps one at a time across turns.\n\n");
 
 					for (var flow : flows) {
 						prompt.append("Flow: ").append(flow.name()).append("\n");
@@ -576,7 +650,7 @@ public class RunService {
 						prompt.append("\n");
 					}
 
-					prompt.append("INSTRUCTION: When the user's request matches a flow trigger, call app.navigate for each step's target in order. Do not skip steps.\n\n");
+					prompt.append("INSTRUCTION: When the user's request matches a flow trigger, execute ONE flow step per turn (the first step, or the next step if the user is continuing the tour). After that step, give a final answer describing where the user is and preview the next flow step. Do not run the entire flow in one turn.\n\n");
 				}
 			}
 			catch (Exception e) {

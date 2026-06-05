@@ -1,12 +1,18 @@
 package com.actbrow.actbrow.service;
 
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.api.dto.ConversationRequest;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
+import com.actbrow.actbrow.api.dto.ConversationSummaryResponse;
+import com.actbrow.actbrow.conversation.UserMessageDisplay;
+import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.model.ConversationEntity;
 import com.actbrow.actbrow.model.ConversationMessageEntity;
 import com.actbrow.actbrow.model.ConversationMessageRole;
@@ -44,6 +50,22 @@ public class ConversationService {
 		return conversationRepository.existsById(conversationId);
 	}
 
+	public List<ConversationSummaryResponse> listForUser(String userId) {
+		List<AssistantDefinitionEntity> assistants = assistantService.listEntitiesByUser(userId);
+		if (assistants.isEmpty()) {
+			return List.of();
+		}
+		Map<String, AssistantDefinitionEntity> assistantsById = assistants.stream()
+			.collect(Collectors.toMap(AssistantDefinitionEntity::getId, Function.identity()));
+		List<String> assistantIds = assistants.stream()
+			.map(AssistantDefinitionEntity::getId)
+			.toList();
+
+		return conversationRepository.findAllByAssistantIdInOrderByCreatedAtDesc(assistantIds).stream()
+			.map(conversation -> toSummary(conversation, assistantsById.get(conversation.getAssistantId())))
+			.toList();
+	}
+
 	@Transactional
 	public void deleteMessagesAndConversation(String conversationId) {
 		messageRepository.deleteByConversationId(conversationId);
@@ -65,5 +87,33 @@ public class ConversationService {
 
 	public List<ConversationMessageEntity> listMessages(String conversationId) {
 		return messageRepository.findAllByConversationIdOrderByCreatedAtAsc(conversationId);
+	}
+
+	private ConversationSummaryResponse toSummary(ConversationEntity conversation, AssistantDefinitionEntity assistant) {
+		var lastMessage = messageRepository.findTopByConversationIdOrderByCreatedAtDesc(conversation.getId());
+		long messageCount = messageRepository.countByConversationId(conversation.getId());
+		String preview = lastMessage.map(ConversationMessageEntity::getContent).map(this::preview).orElse("");
+		String role = lastMessage.map(m -> m.getRole().name()).orElse(null);
+
+		return new ConversationSummaryResponse(
+			conversation.getId(),
+			conversation.getAssistantId(),
+			assistant == null ? "Unknown assistant" : assistant.getName(),
+			conversation.getCreatedAt(),
+			lastMessage.map(ConversationMessageEntity::getCreatedAt).orElse(null),
+			messageCount,
+			role,
+			preview
+		);
+	}
+
+	private String preview(String content) {
+		String displayContent = UserMessageDisplay.stripStoredAppendix(content)
+			.replaceAll("\\s+", " ")
+			.trim();
+		if (displayContent.length() <= 140) {
+			return displayContent;
+		}
+		return displayContent.substring(0, 137) + "...";
 	}
 }

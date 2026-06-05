@@ -257,7 +257,8 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 		builder.append("When you ask a clarifying question, offer 2 to 4 concrete options and format them exactly like this: ");
 		builder.append("first the question in plain text, then a new line `OPTIONS: option one | option two`, ");
 		builder.append("and optionally a new line `RECOMMENDED: option one`. ");
-		builder.append("Do not use the OPTIONS format unless you are actually asking the user to choose.");
+		builder.append("Use the same OPTIONS format when pausing a guided walkthrough so the user can click Continue to proceed. ");
+		builder.append("Do not use the OPTIONS format unless you are asking the user to choose or continue a tour.");
 		return builder.toString();
 	}
 
