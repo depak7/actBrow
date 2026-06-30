@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.actbrow.actbrow.model.UserEntity;
 import com.actbrow.actbrow.repository.UserRepository;
 import com.actbrow.actbrow.service.GoogleIdTokenVerifier;
+import com.actbrow.actbrow.service.SignupNotificationService;
 
 @RestController
 @RequestMapping("/auth")
@@ -22,11 +23,14 @@ public class AuthController {
 
 	private final UserRepository userRepository;
 	private final GoogleIdTokenVerifier googleIdTokenVerifier;
+	private final SignupNotificationService signupNotificationService;
 	private final SecureRandom secureRandom = new SecureRandom();
 
-	public AuthController(UserRepository userRepository, GoogleIdTokenVerifier googleIdTokenVerifier) {
+	public AuthController(UserRepository userRepository, GoogleIdTokenVerifier googleIdTokenVerifier,
+			SignupNotificationService signupNotificationService) {
 		this.userRepository = userRepository;
 		this.googleIdTokenVerifier = googleIdTokenVerifier;
+		this.signupNotificationService = signupNotificationService;
 	}
 
 	@PostMapping("/google")
@@ -84,7 +88,9 @@ public class AuthController {
 				newUser.setFullName(resolvedFullName);
 				newUser.setProfilePictureUrl(resolvedPictureUrl);
 				newUser.setApiKey(generateApiKey());
-				return userRepository.save(newUser);
+				UserEntity saved = userRepository.save(newUser);
+				signupNotificationService.notifyNewSignup(saved);
+				return saved;
 			});
 		if (user.getApiKey() == null || user.getApiKey().isBlank()) {
 			user.setApiKey(generateApiKey());
