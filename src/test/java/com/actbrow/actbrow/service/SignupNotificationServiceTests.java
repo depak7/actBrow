@@ -20,6 +20,7 @@ import org.springframework.mail.javamail.JavaMailSenderImpl;
 
 import com.actbrow.actbrow.config.NotificationProperties;
 import com.actbrow.actbrow.model.UserEntity;
+import com.actbrow.actbrow.model.WaitlistEntry;
 
 class SignupNotificationServiceTests {
 
@@ -56,6 +57,30 @@ class SignupNotificationServiceTests {
 		assertThat(sent.getFrom()).isEqualTo("noreply@example.com");
 		assertThat(sent.getSubject()).isEqualTo("New actbrow signup: alice@example.com");
 		assertThat(sent.getText()).contains("alice@example.com").contains("Alice Example").contains("user-123");
+	}
+
+	@Test
+	void sendsWaitlistEmailWithExpectedFieldsWhenEnabled() {
+		JavaMailSender sender = mock(JavaMailSender.class);
+		var props = new NotificationProperties(true, "admin@example.com", "noreply@example.com");
+		var service = new SignupNotificationService(providerOf(sender), props);
+
+		WaitlistEntry entry = new WaitlistEntry();
+		entry.setId("wl-1");
+		entry.setEmail("bob@example.com");
+		entry.setName("Bob Example");
+		entry.setCompany("Acme Inc");
+		entry.setUseCase("Customer support");
+		service.notifyNewWaitlist(entry);
+
+		ArgumentCaptor<SimpleMailMessage> captor = ArgumentCaptor.forClass(SimpleMailMessage.class);
+		verify(sender).send(captor.capture());
+		SimpleMailMessage sent = captor.getValue();
+
+		assertThat(sent.getTo()).containsExactly("admin@example.com");
+		assertThat(sent.getSubject()).isEqualTo("New actbrow waitlist signup: bob@example.com");
+		assertThat(sent.getText()).contains("bob@example.com").contains("Bob Example")
+			.contains("Acme Inc").contains("Customer support");
 	}
 
 	@Test
