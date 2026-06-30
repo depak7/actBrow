@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import com.actbrow.actbrow.config.NotificationProperties;
 import com.actbrow.actbrow.model.UserEntity;
+import com.actbrow.actbrow.model.WaitlistEntry;
 
 /**
  * Sends a "new user signed up" email to the configured admin recipient. Sends are async and
@@ -31,8 +32,29 @@ public class SignupNotificationService {
 
 	@Async
 	public void notifyNewSignup(UserEntity user) {
+		String body = "A new user just signed up for actbrow.\n\n"
+			+ "Email:      " + user.getEmail() + "\n"
+			+ "Full name:  " + orNone(user.getFullName()) + "\n"
+			+ "User ID:    " + user.getId() + "\n"
+			+ "Signed up:  " + user.getCreatedAt() + "\n";
+		send("New actbrow signup: " + user.getEmail(), body, user.getEmail());
+	}
+
+	@Async
+	public void notifyNewWaitlist(WaitlistEntry entry) {
+		String body = "A new user just joined the actbrow waitlist.\n\n"
+			+ "Email:     " + entry.getEmail() + "\n"
+			+ "Name:      " + orNone(entry.getName()) + "\n"
+			+ "Company:   " + orNone(entry.getCompany()) + "\n"
+			+ "Use case:  " + orNone(entry.getUseCase()) + "\n"
+			+ "Joined:    " + entry.getCreatedAt() + "\n";
+		send("New actbrow waitlist signup: " + entry.getEmail(), body, entry.getEmail());
+	}
+
+	/** Shared, fail-safe send. No-ops (with a log line) when disabled or unconfigured. */
+	private void send(String subject, String body, String contextEmail) {
 		if (!properties.signupEnabled()) {
-			log.debug("Signup notification disabled; skipping email for {}", user.getEmail());
+			log.debug("Signup notification disabled; skipping email for {}", contextEmail);
 			return;
 		}
 		String recipient = properties.signupRecipient();
@@ -52,21 +74,17 @@ public class SignupNotificationService {
 			if (properties.from() != null && !properties.from().isBlank()) {
 				message.setFrom(properties.from());
 			}
-			message.setSubject("New actbrow signup: " + user.getEmail());
-			message.setText(buildBody(user));
+			message.setSubject(subject);
+			message.setText(body);
 			mailSender.send(message);
-			log.info("Sent signup notification for {} to {}", user.getEmail(), recipient);
+			log.info("Sent notification for {} to {}", contextEmail, recipient);
 		}
 		catch (Exception exception) {
-			log.error("Failed to send signup notification for {}", user.getEmail(), exception);
+			log.error("Failed to send notification for {}", contextEmail, exception);
 		}
 	}
 
-	private String buildBody(UserEntity user) {
-		return "A new user just signed up for actbrow.\n\n"
-			+ "Email:      " + user.getEmail() + "\n"
-			+ "Full name:  " + (user.getFullName() != null ? user.getFullName() : "(none)") + "\n"
-			+ "User ID:    " + user.getId() + "\n"
-			+ "Signed up:  " + user.getCreatedAt() + "\n";
+	private static String orNone(String value) {
+		return value != null && !value.isBlank() ? value : "(none)";
 	}
 }

@@ -11,9 +11,12 @@ import com.actbrow.actbrow.repository.WaitlistRepository;
 public class WaitlistService {
 
 	private final WaitlistRepository waitlistRepository;
+	private final SignupNotificationService signupNotificationService;
 
-	public WaitlistService(WaitlistRepository waitlistRepository) {
+	public WaitlistService(WaitlistRepository waitlistRepository,
+			SignupNotificationService signupNotificationService) {
 		this.waitlistRepository = waitlistRepository;
+		this.signupNotificationService = signupNotificationService;
 	}
 
 	public WaitlistResponse joinWaitlist(WaitlistRequest request) {
@@ -26,8 +29,9 @@ public class WaitlistService {
 		entry.setName(request.name());
 		entry.setCompany(request.company());
 		entry.setUseCase(request.useCase());
-		
+
 		WaitlistEntry saved = waitlistRepository.save(entry);
+		signupNotificationService.notifyNewWaitlist(saved);
 		return toResponse(saved);
 	}
 
