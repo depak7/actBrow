@@ -9,3 +9,5 @@
   - Creates `run_checkpoints` (Phase 4: resume after interruption)
 - `V20260701_3__create_run_traces.sql`
   - Creates `run_traces` (Phase 5: eval trace recorder)
+- `V20260701_4__fix_run_steps_type_check.sql`
+  - Recreates `run_steps_type_check` to include VERIFIER_DECISION + POLICY_DECISION

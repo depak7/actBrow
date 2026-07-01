@@ -1492,7 +1492,10 @@
       debug: !!config.debug,
       navigate: config.navigate,
       router: config.router,
-      routerMethod: config.routerMethod
+      routerMethod: config.routerMethod,
+      // Forward the per-request header hook so browser HTTP tools can attach page-owned auth
+      // (e.g. the host app's Bearer token). Without this the client never sees it → 401.
+      getRequestHeaders: config.getRequestHeaders
     });
     global.ActbrowWidgetClient = client;
     // Reconnect any in-progress run from a previous page load or hard refresh
@@ -1882,8 +1885,12 @@
           return client.sendMessage({ content: text });
         })
         .catch(function (error) {
+          // Log the raw detail for developers, but only show the end-user a friendly message.
+          if (config.debug && global.console && console.error) {
+            console.error("[ActBrow] sendMessage failed:", error);
+          }
           removeThinkingRow();
-          appendMessage("assistant", "Request failed: " + error.message);
+          appendMessage("assistant", labels.errorMessage || "Sorry, something went wrong. Please try again.");
           setStatus("");
           setSendingState(false);
         });
@@ -2324,9 +2331,13 @@
     });
 
     client.on("run.failed", function (event) {
+      // The server already sends a sanitized, user-safe message; fall back to a generic one.
+      if (config.debug && global.console && console.error) {
+        console.error("[ActBrow] run failed:", event && event.payload);
+      }
       removeThinkingRow();
       finalizeStepsRow("failed");
-      appendMessage("assistant", "Request failed: " + event.payload.message);
+      appendMessage("assistant", labels.errorMessage || "Sorry, something went wrong. Please try again.");
       setStatus("");
       setSendingState(false);
     });

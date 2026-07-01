@@ -394,7 +394,9 @@ public class RunService {
 				// Exception surfaced from a cancelled run — swallow to avoid writing to a deleted row.
 				return;
 			}
-			failRun(run, exception.getMessage(), exception);
+			// Log full detail server-side, but never surface raw internal errors (SQL, stack traces)
+			// to the client — the user-facing message stays generic.
+			failRun(run, "The assistant hit an unexpected error while processing this request.", exception);
 		}
 		finally {
 			startedRuns.remove(runId);
@@ -609,12 +611,19 @@ public class RunService {
 	}
 
 	private void recordStep(String runId, int stepIndex, RunStepType type, String payload) {
-		RunStepEntity step = new RunStepEntity();
-		step.setRunId(runId);
-		step.setStepIndex(stepIndex);
-		step.setType(type);
-		step.setPayload(payload);
-		runStepRepository.save(step);
+		// Trace steps are auxiliary — a failure to persist one must never abort the run or surface
+		// to the user. Log and continue.
+		try {
+			RunStepEntity step = new RunStepEntity();
+			step.setRunId(runId);
+			step.setStepIndex(stepIndex);
+			step.setType(type);
+			step.setPayload(payload);
+			runStepRepository.save(step);
+		}
+		catch (Exception exception) {
+			log.warn("Failed to record run step {} for run {} (non-fatal)", type, runId, exception);
+		}
 	}
 
 	private RunResponse toResponse(RunEntity run) {

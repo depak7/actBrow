@@ -5,6 +5,8 @@ import java.util.Map;
 import java.security.SecureRandom;
 import java.util.Base64;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +22,8 @@ import com.actbrow.actbrow.service.SignupNotificationService;
 @RestController
 @RequestMapping("/auth")
 public class AuthController {
+
+	private static final Logger log = LoggerFactory.getLogger(AuthController.class);
 
 	private final UserRepository userRepository;
 	private final GoogleIdTokenVerifier googleIdTokenVerifier;
@@ -65,8 +69,9 @@ public class AuthController {
 				}
 			}
 			catch (Exception exception) {
-				String msg = exception.getMessage() != null ? exception.getMessage() : "Google sign-in failed";
-				return ResponseEntity.badRequest().body(Map.of("error", msg));
+				// Never surface raw verifier detail (token internals, network errors) to the client.
+				log.warn("Google ID token verification failed", exception);
+				return ResponseEntity.badRequest().body(Map.of("error", "Google sign-in failed"));
 			}
 		}
 
