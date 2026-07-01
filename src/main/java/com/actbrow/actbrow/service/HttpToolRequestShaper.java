@@ -14,19 +14,25 @@ import java.util.Set;
  *
  * <p>The {@code parameters} metadata is a list of {name, in, required} records where
  * {@code in} is one of {@code path}, {@code query}, or {@code header}. Anything not declared
- * there is treated as a request-body field. Tools without {@code parameters} metadata
- * (e.g. hand-written HTTP tools) shape to the literal path with the whole argument map as body.
+ * there is treated as a request-body field — except that, for tools whose path template still
+ * contains {@code {placeholder}} segments, matching arguments are substituted into the path even
+ * when no {@code parameters} metadata declares them (covers synced/hand-written tools). Leftover
+ * arguments become the request body, or — for methods that carry no body (GET/HEAD) — the query
+ * string, since a GET body would otherwise be silently dropped.
  */
 public final class HttpToolRequestShaper {
 
 	private HttpToolRequestShaper() {
 	}
 
+	private static final java.util.regex.Pattern PATH_PLACEHOLDER =
+		java.util.regex.Pattern.compile("\\{([^}/]+)\\}");
+
 	public record ShapedRequest(String path, Map<String, Object> body, Map<String, String> headers) {
 	}
 
 	@SuppressWarnings("unchecked")
-	public static ShapedRequest shape(String pathTemplate, Object parametersMetadata,
+	public static ShapedRequest shape(String method, String pathTemplate, Object parametersMetadata,
 		Map<String, Object> arguments) {
 		Map<String, Object> args = arguments == null ? Map.of() : arguments;
 		String path = pathTemplate == null ? "/" : pathTemplate;
@@ -71,14 +77,34 @@ public final class HttpToolRequestShaper {
 			}
 		}
 
-		Map<String, Object> body = new LinkedHashMap<>();
-		for (Map.Entry<String, Object> entry : args.entrySet()) {
-			if (!consumed.contains(entry.getKey())) {
-				body.put(entry.getKey(), entry.getValue());
+		// Substitute any remaining {placeholder} from matching args, even when undeclared in
+		// parameters metadata (synced tools store the template path but not the param list).
+		java.util.regex.Matcher matcher = PATH_PLACEHOLDER.matcher(path);
+		while (matcher.find()) {
+			String name = matcher.group(1);
+			if (args.containsKey(name)) {
+				path = path.replace("{" + name + "}", encodePathSegment(stringValue(args.get(name))));
+				consumed.add(name);
+				matcher = PATH_PLACEHOLDER.matcher(path);
 			}
 		}
 
-		String finalPath = query.length() == 0 ? path : path + "?" + query;
+		boolean carriesBody = !("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method));
+		Map<String, Object> body = new LinkedHashMap<>();
+		for (Map.Entry<String, Object> entry : args.entrySet()) {
+			if (consumed.contains(entry.getKey())) {
+				continue;
+			}
+			if (carriesBody) {
+				body.put(entry.getKey(), entry.getValue());
+			}
+			else {
+				appendQuery(query, entry.getKey(), entry.getValue());
+			}
+		}
+
+		String separator = path.indexOf('?') >= 0 ? "&" : "?";
+		String finalPath = query.length() == 0 ? path : path + separator + query;
 		return new ShapedRequest(finalPath, body, headers);
 	}
 

@@ -32,6 +32,6 @@ build/
 ### VS Code ###
 .vscode/
 
-### Docker (local only) ###
-docker-compose.yml
+### Docker ###
+# docker-compose.yml is the committed one-command dev stack; only local overrides are ignored.
 docker-compose.override.yml

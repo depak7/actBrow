@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.agent.ToolDescriptor;
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.ToolRequest;
 import com.actbrow.actbrow.api.dto.ToolResponse;
 import com.actbrow.actbrow.model.AssistantToolBindingEntity;
@@ -168,7 +169,7 @@ public class ToolService {
 
 	public void attachToolIfAbsent(String assistantId, String toolKey) {
 		ToolDefinitionEntity tool = toolRepository.findByKey(toolKey)
-			.orElseThrow(() -> new IllegalArgumentException("Tool not found: " + toolKey));
+			.orElseThrow(() -> new NotFoundException("Tool not found: " + toolKey));
 		if (bindingRepository.findByAssistantIdAndToolId(assistantId, tool.getId()).isPresent()) {
 			return;
 		}
@@ -183,13 +184,13 @@ public class ToolService {
 
 	public void detachTool(String assistantId, String toolId) {
 		AssistantToolBindingEntity binding = bindingRepository.findByAssistantIdAndToolId(assistantId, toolId)
-			.orElseThrow(() -> new IllegalArgumentException("Assistant tool binding not found"));
+			.orElseThrow(() -> new NotFoundException("Assistant tool binding not found"));
 		bindingRepository.delete(binding);
 	}
 
 	public ToolDefinitionEntity requireEntity(String toolId) {
 		return toolRepository.findById(toolId)
-			.orElseThrow(() -> new IllegalArgumentException("Tool not found"));
+			.orElseThrow(() -> new NotFoundException("Tool not found"));
 	}
 
 	public List<ToolDescriptor> listDescriptorsForAssistant(String assistantId) {

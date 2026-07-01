@@ -4,11 +4,11 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import com.actbrow.actbrow.model.ConversationMessageEntity;
 import com.actbrow.actbrow.model.ConversationMessageRole;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Shapes conversation history for model calls so current-turn grounding is preserved while
@@ -16,7 +16,9 @@ import com.actbrow.actbrow.model.ConversationMessageRole;
  */
 public final class ModelConversationWindow {
 
-	private static final Pattern TOOL_CALL_ID = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
+	private static final String OPEN_MARKER = "[tool_calls]";
+	private static final String CLOSE_MARKER = "[/tool_calls]";
+	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private ModelConversationWindow() {
 	}
@@ -68,14 +70,42 @@ public final class ModelConversationWindow {
 	}
 
 	private static boolean isToolCallsEnvelope(String content) {
-		return content != null && content.startsWith("[tool_calls]");
+		return content != null && content.startsWith(OPEN_MARKER);
 	}
 
+	/**
+	 * Parse the top-level {@code id} of each tool call in a {@code [tool_calls][...][/tool_calls]}
+	 * envelope. Parses the JSON array so an {@code id} field nested inside a call's
+	 * {@code function.arguments} is never mistaken for a tool-call id. On any parse failure we
+	 * return an empty list, which keeps the message (better than dropping a legitimate turn).
+	 */
 	private static List<String> extractToolCallIds(String content) {
 		List<String> ids = new ArrayList<>();
-		Matcher matcher = TOOL_CALL_ID.matcher(content);
-		while (matcher.find()) {
-			ids.add(matcher.group(1));
+		if (content == null) {
+			return ids;
+		}
+		String json = content;
+		int open = json.indexOf(OPEN_MARKER);
+		if (open >= 0) {
+			json = json.substring(open + OPEN_MARKER.length());
+		}
+		int close = json.lastIndexOf(CLOSE_MARKER);
+		if (close >= 0) {
+			json = json.substring(0, close);
+		}
+		try {
+			JsonNode array = MAPPER.readTree(json);
+			if (array.isArray()) {
+				for (JsonNode call : array) {
+					JsonNode id = call.get("id");
+					if (id != null && id.isTextual()) {
+						ids.add(id.asText());
+					}
+				}
+			}
+		}
+		catch (Exception ignored) {
+			// Malformed envelope — treat as no ids so the message is retained rather than dropped.
 		}
 		return ids;
 	}

@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.springframework.stereotype.Service;
 
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.NavigationFlowRequest;
 import com.actbrow.actbrow.api.dto.NavigationFlowResponse;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
@@ -63,7 +64,7 @@ public class NavigationFlowService {
 		AssistantDefinitionEntity assistant) {
 		NavigationFlowEntity entity = navigationFlowRepository
 			.findByAssistantIdAndId(assistantId, flowId)
-			.orElseThrow(() -> new IllegalArgumentException("Navigation flow not found"));
+			.orElseThrow(() -> new NotFoundException("Navigation flow not found"));
 		entity.setName(request.name());
 		entity.setTriggerPhrase(request.triggerPhrase());
 		entity.setStepsJson(toJson(request.steps()));
@@ -74,13 +75,13 @@ public class NavigationFlowService {
 	public void delete(String assistantId, String flowId) {
 		NavigationFlowEntity entity = navigationFlowRepository
 			.findByAssistantIdAndId(assistantId, flowId)
-			.orElseThrow(() -> new IllegalArgumentException("Navigation flow not found"));
+			.orElseThrow(() -> new NotFoundException("Navigation flow not found"));
 		navigationFlowRepository.delete(entity);
 	}
 
 	public NavigationFlowEntity findById(String assistantId, String flowId) {
 		return navigationFlowRepository.findByAssistantIdAndId(assistantId, flowId)
-			.orElseThrow(() -> new IllegalArgumentException("Navigation flow not found"));
+			.orElseThrow(() -> new NotFoundException("Navigation flow not found"));
 	}
 
 	private NavigationFlowResponse toResponse(NavigationFlowEntity entity) {

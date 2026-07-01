@@ -2,6 +2,7 @@ package com.actbrow.actbrow.model;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -34,6 +35,17 @@ public class ConversationMessageEntity {
 	@Column(nullable = false)
 	private Instant createdAt;
 
+	/**
+	 * Monotonic tiebreaker for {@link #createdAt}. Two messages appended in the same millisecond
+	 * (e.g. an ASSISTANT tool_calls envelope and its TOOL result) would otherwise sort
+	 * non-deterministically and break tool_calls/tool pairing for the model. Ordered by
+	 * (createdAt, seq). Process-local counter — good enough as an intra-instant tiebreaker.
+	 */
+	@Column
+	private Long seq;
+
+	private static final AtomicLong SEQ = new AtomicLong();
+
 	@PrePersist
 	void prePersist() {
 		if (id == null) {
@@ -42,6 +54,17 @@ public class ConversationMessageEntity {
 		if (createdAt == null) {
 			createdAt = Instant.now();
 		}
+		if (seq == null) {
+			seq = SEQ.incrementAndGet();
+		}
+	}
+
+	public Long getSeq() {
+		return seq;
+	}
+
+	public void setSeq(Long seq) {
+		this.seq = seq;
 	}
 
 	public String getId() {

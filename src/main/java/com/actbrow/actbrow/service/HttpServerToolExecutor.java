@@ -2,6 +2,7 @@ package com.actbrow.actbrow.service;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.springframework.http.HttpEntity;
@@ -35,7 +36,7 @@ public class HttpServerToolExecutor {
 			String baseUrl = extractBaseUrl(tool);
 			String method = extractMethod(tool);
 			String pathTemplate = extractPath(tool);
-			HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(pathTemplate,
+			HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(method, pathTemplate,
 				tool.metadata().get("parameters"), arguments);
 			String path = shaped.path();
 
@@ -87,12 +88,18 @@ public class HttpServerToolExecutor {
 		return path != null ? path.toString() : "/";
 	}
 
-	@SuppressWarnings("unchecked")
 	private Map<String, String> extractHeaders(ToolDescriptor tool) {
 		Object headers = tool.metadata().get("headers");
-		if (headers instanceof Map) {
-			return (Map<String, String>) headers;
+		Map<String, String> result = new LinkedHashMap<>();
+		if (headers instanceof Map<?, ?> map) {
+			// Metadata is JSON-deserialized, so values may be non-String (numbers, nested objects).
+			// Coerce to String rather than an unchecked cast that would throw at header-set time.
+			for (Map.Entry<?, ?> entry : map.entrySet()) {
+				if (entry.getKey() != null && entry.getValue() != null) {
+					result.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+				}
+			}
 		}
-		return Map.of();
+		return result;
 	}
 }

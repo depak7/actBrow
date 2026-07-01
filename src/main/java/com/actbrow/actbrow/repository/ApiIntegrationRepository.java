@@ -12,4 +12,6 @@ public interface ApiIntegrationRepository extends JpaRepository<ApiIntegrationEn
 	List<ApiIntegrationEntity> findAllByAssistantIdOrderByCreatedAtDesc(String assistantId);
 
 	Optional<ApiIntegrationEntity> findByAssistantIdAndName(String assistantId, String name);
+
+	void deleteAllByAssistantId(String assistantId);
 }

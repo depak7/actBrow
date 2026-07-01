@@ -9,7 +9,7 @@ import com.actbrow.actbrow.model.ConversationMessageEntity;
 
 public interface ConversationMessageRepository extends JpaRepository<ConversationMessageEntity, String> {
 
-	List<ConversationMessageEntity> findAllByConversationIdOrderByCreatedAtAsc(String conversationId);
+	List<ConversationMessageEntity> findAllByConversationIdOrderByCreatedAtAscSeqAsc(String conversationId);
 
 	Optional<ConversationMessageEntity> findTopByConversationIdOrderByCreatedAtDesc(String conversationId);
 
