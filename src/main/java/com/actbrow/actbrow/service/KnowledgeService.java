@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.KnowledgeDocumentRequest;
 import com.actbrow.actbrow.api.dto.KnowledgeDocumentResponse;
 import com.actbrow.actbrow.model.KnowledgeDocumentEntity;
@@ -47,7 +48,7 @@ public class KnowledgeService {
 
 	public void delete(String assistantId, String knowledgeId) {
 		KnowledgeDocumentEntity entity = knowledgeDocumentRepository.findByAssistantIdAndId(assistantId, knowledgeId)
-			.orElseThrow(() -> new IllegalArgumentException("Knowledge document not found"));
+			.orElseThrow(() -> new NotFoundException("Knowledge document not found"));
 		knowledgeDocumentRepository.delete(entity);
 	}
 

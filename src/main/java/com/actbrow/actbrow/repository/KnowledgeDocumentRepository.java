@@ -16,4 +16,6 @@ public interface KnowledgeDocumentRepository extends JpaRepository<KnowledgeDocu
 	Optional<KnowledgeDocumentEntity> findByAssistantIdAndId(String assistantId, String id);
 
 	Optional<KnowledgeDocumentEntity> findByAssistantIdAndTitle(String assistantId, String title);
+
+	void deleteAllByAssistantId(String assistantId);
 }

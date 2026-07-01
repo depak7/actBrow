@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.ConversationRequest;
 import com.actbrow.actbrow.api.dto.ConversationResponse;
 import com.actbrow.actbrow.api.dto.ConversationSummaryResponse;
@@ -43,7 +44,7 @@ public class ConversationService {
 
 	public ConversationEntity requireConversation(String conversationId) {
 		return conversationRepository.findById(conversationId)
-			.orElseThrow(() -> new IllegalArgumentException("Conversation not found"));
+			.orElseThrow(() -> new NotFoundException("Conversation not found"));
 	}
 
 	public boolean exists(String conversationId) {
@@ -86,7 +87,7 @@ public class ConversationService {
 	}
 
 	public List<ConversationMessageEntity> listMessages(String conversationId) {
-		return messageRepository.findAllByConversationIdOrderByCreatedAtAsc(conversationId);
+		return messageRepository.findAllByConversationIdOrderByCreatedAtAscSeqAsc(conversationId);
 	}
 
 	private ConversationSummaryResponse toSummary(ConversationEntity conversation, AssistantDefinitionEntity assistant) {

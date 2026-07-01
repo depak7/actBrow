@@ -865,11 +865,30 @@
       Object.keys(rawHeaders).forEach(function (name) {
         var normalized = name.toLowerCase();
         if (forbiddenBrowserHttpHeaders[normalized]) return;
+        // Never trust a server-stored Authorization header — the credential must come from the
+        // embedding page (see config.getRequestHeaders below), not from saved tool metadata.
         if (normalized === "authorization") return;
         headers[name] = String(rawHeaders[name]);
       });
       if (method !== "GET" && method !== "HEAD" && !headers["Content-Type"]) {
         headers["Content-Type"] = "application/json";
+      }
+
+      // Per-request header hook: lets the embedder inject auth from page state (e.g. a Bearer
+      // token kept in localStorage) at fetch time. Applied last so it wins, and may set
+      // Authorization. The same-origin guard above ensures these headers never go cross-origin
+      // unless the tool explicitly opted into allowCrossOrigin.
+      if (typeof config.getRequestHeaders === "function") {
+        try {
+          var dynamicHeaders = config.getRequestHeaders(payload.toolKey, target) || {};
+          Object.keys(dynamicHeaders).forEach(function (name) {
+            if (forbiddenBrowserHttpHeaders[name.toLowerCase()]) return;
+            headers[name] = String(dynamicHeaders[name]);
+          });
+        }
+        catch (hookError) {
+          debugLog(config, "getRequestHeaders hook threw", hookError);
+        }
       }
 
       var init = {
@@ -1473,7 +1492,10 @@
       debug: !!config.debug,
       navigate: config.navigate,
       router: config.router,
-      routerMethod: config.routerMethod
+      routerMethod: config.routerMethod,
+      // Forward the per-request header hook so browser HTTP tools can attach page-owned auth
+      // (e.g. the host app's Bearer token). Without this the client never sees it → 401.
+      getRequestHeaders: config.getRequestHeaders
     });
     global.ActbrowWidgetClient = client;
     // Reconnect any in-progress run from a previous page load or hard refresh
@@ -1863,8 +1885,12 @@
           return client.sendMessage({ content: text });
         })
         .catch(function (error) {
+          // Log the raw detail for developers, but only show the end-user a friendly message.
+          if (config.debug && global.console && console.error) {
+            console.error("[ActBrow] sendMessage failed:", error);
+          }
           removeThinkingRow();
-          appendMessage("assistant", "Request failed: " + error.message);
+          appendMessage("assistant", labels.errorMessage || "Sorry, something went wrong. Please try again.");
           setStatus("");
           setSendingState(false);
         });
@@ -2305,9 +2331,13 @@
     });
 
     client.on("run.failed", function (event) {
+      // The server already sends a sanitized, user-safe message; fall back to a generic one.
+      if (config.debug && global.console && console.error) {
+        console.error("[ActBrow] run failed:", event && event.payload);
+      }
       removeThinkingRow();
       finalizeStepsRow("failed");
-      appendMessage("assistant", "Request failed: " + event.payload.message);
+      appendMessage("assistant", labels.errorMessage || "Sorry, something went wrong. Please try again.");
       setStatus("");
       setSendingState(false);
     });

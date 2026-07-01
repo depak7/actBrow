@@ -5,5 +5,5 @@ import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "actbrow.agent")
-public record ActbrowProperties(int maxSteps, Duration toolTimeout) {
+public record ActbrowProperties(int maxSteps, Duration toolTimeout, int maxToolRetries) {
 }

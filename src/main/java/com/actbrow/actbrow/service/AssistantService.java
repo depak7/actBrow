@@ -7,11 +7,24 @@ import java.util.Locale;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.AssistantResponse;
 import com.actbrow.actbrow.api.dto.CreateAssistantRequest;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
+import com.actbrow.actbrow.model.ConversationEntity;
+import com.actbrow.actbrow.model.RunEntity;
+import com.actbrow.actbrow.repository.ApiIntegrationRepository;
 import com.actbrow.actbrow.repository.AssistantRepository;
+import com.actbrow.actbrow.repository.AssistantToolBindingRepository;
+import com.actbrow.actbrow.repository.ConversationMessageRepository;
+import com.actbrow.actbrow.repository.ConversationRepository;
+import com.actbrow.actbrow.repository.KnowledgeDocumentRepository;
+import com.actbrow.actbrow.repository.NavigationFlowRepository;
+import com.actbrow.actbrow.repository.RunMemoryRepository;
+import com.actbrow.actbrow.repository.RunRepository;
+import com.actbrow.actbrow.repository.RunStepRepository;
 
 @Service
 public class AssistantService {
@@ -19,12 +32,39 @@ public class AssistantService {
 	private final AssistantRepository assistantRepository;
 	private final ToolService toolService;
 	private final String defaultChatModel;
+	private final AssistantToolBindingRepository toolBindingRepository;
+	private final NavigationFlowRepository navigationFlowRepository;
+	private final KnowledgeDocumentRepository knowledgeDocumentRepository;
+	private final ApiIntegrationRepository apiIntegrationRepository;
+	private final ConversationRepository conversationRepository;
+	private final ConversationMessageRepository conversationMessageRepository;
+	private final RunRepository runRepository;
+	private final RunStepRepository runStepRepository;
+	private final RunMemoryRepository runMemoryRepository;
 
 	public AssistantService(AssistantRepository assistantRepository, ToolService toolService,
-		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
+		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel,
+		AssistantToolBindingRepository toolBindingRepository,
+		NavigationFlowRepository navigationFlowRepository,
+		KnowledgeDocumentRepository knowledgeDocumentRepository,
+		ApiIntegrationRepository apiIntegrationRepository,
+		ConversationRepository conversationRepository,
+		ConversationMessageRepository conversationMessageRepository,
+		RunRepository runRepository,
+		RunStepRepository runStepRepository,
+		RunMemoryRepository runMemoryRepository) {
 		this.assistantRepository = assistantRepository;
 		this.toolService = toolService;
 		this.defaultChatModel = defaultChatModel;
+		this.toolBindingRepository = toolBindingRepository;
+		this.navigationFlowRepository = navigationFlowRepository;
+		this.knowledgeDocumentRepository = knowledgeDocumentRepository;
+		this.apiIntegrationRepository = apiIntegrationRepository;
+		this.conversationRepository = conversationRepository;
+		this.conversationMessageRepository = conversationMessageRepository;
+		this.runRepository = runRepository;
+		this.runStepRepository = runStepRepository;
+		this.runMemoryRepository = runMemoryRepository;
 	}
 
 	public AssistantResponse createOrUpdate(CreateAssistantRequest request) {
@@ -44,13 +84,13 @@ public class AssistantService {
 
 	public AssistantDefinitionEntity requireEntity(String assistantId) {
 		return assistantRepository.findById(assistantId)
-			.orElseThrow(() -> new IllegalArgumentException("Assistant not found"));
+			.orElseThrow(() -> new NotFoundException("Assistant not found"));
 	}
 
 	public AssistantDefinitionEntity requireOwnedEntity(String assistantId, String userId) {
 		AssistantDefinitionEntity entity = requireEntity(assistantId);
 		if (userId == null || !userId.equals(entity.getUserId())) {
-			throw new IllegalArgumentException("Assistant not found");
+			throw new NotFoundException("Assistant not found");
 		}
 		return entity;
 	}
@@ -91,6 +131,32 @@ public class AssistantService {
 		entity.setUserId(request.userId());
 		AssistantDefinitionEntity saved = assistantRepository.save(entity);
 		return toResponse(saved);
+	}
+
+	/**
+	 * Delete an assistant and everything that hangs off it. Idempotent: deleting an assistant that
+	 * no longer exists is a no-op. Dependents are removed first because navigation_flows has a real
+	 * FK to assistants; the rest is orphan cleanup so nothing dangles.
+	 */
+	@Transactional
+	public void delete(String id) {
+		if (!assistantRepository.existsById(id)) {
+			return;
+		}
+		toolBindingRepository.deleteAllByAssistantId(id);
+		navigationFlowRepository.deleteAllByAssistant_Id(id);
+		knowledgeDocumentRepository.deleteAllByAssistantId(id);
+		apiIntegrationRepository.deleteAllByAssistantId(id);
+		for (ConversationEntity conversation : conversationRepository.findAllByAssistantId(id)) {
+			for (RunEntity run : runRepository.findAllByConversationId(conversation.getId())) {
+				runStepRepository.deleteByRunId(run.getId());
+				runMemoryRepository.deleteByRunId(run.getId());
+				runRepository.delete(run);
+			}
+			conversationMessageRepository.deleteByConversationId(conversation.getId());
+			conversationRepository.delete(conversation);
+		}
+		assistantRepository.deleteById(id);
 	}
 
 	private String resolveModel(String requested, AssistantDefinitionEntity existingForUpdate) {

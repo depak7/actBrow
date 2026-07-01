@@ -4,36 +4,33 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
 
 import com.actbrow.actbrow.agent.FinalResponseDecision;
 import com.actbrow.actbrow.agent.ModelDecision;
-import com.actbrow.actbrow.agent.ModelProvider;
 import com.actbrow.actbrow.agent.ToolCall;
 import com.actbrow.actbrow.agent.ToolCallDecision;
 import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.agent.ToolExecutionResult;
+import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.RunResponse;
 import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.actbrow.actbrow.conversation.PageContextParser;
 import com.actbrow.actbrow.conversation.UserMessageDisplay;
 import com.actbrow.actbrow.config.ActbrowProperties;
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.model.ConversationEntity;
 import com.actbrow.actbrow.model.ConversationMessageRole;
 import com.actbrow.actbrow.model.RunEntity;
+import com.actbrow.actbrow.model.RunPhase;
 import com.actbrow.actbrow.model.RunStatus;
 import com.actbrow.actbrow.model.RunStepEntity;
 import com.actbrow.actbrow.model.RunStepType;
@@ -54,25 +51,35 @@ public class RunService {
 	private final ConversationService conversationService;
 	private final AssistantService assistantService;
 	private final ToolService toolService;
-	private final ModelProvider modelProvider;
 	private final RunEventBroker eventBroker;
 	private final PendingClientToolStore pendingClientToolStore;
-	private final BuiltinServerToolExecutor builtinServerToolExecutor;
-	private final HttpServerToolExecutor httpServerToolExecutor;
 	private final NavigationFlowService navigationFlowService;
-	private final KnowledgeSearchToolExecutor knowledgeSearchToolExecutor;
+	private final RunMemoryService runMemoryService;
+	private final RunPlanner runPlanner;
+	private final RunExecutor runExecutor;
+	private final RunVerifier runVerifier;
+	private final RunPolicyEngine runPolicyEngine;
+	private final RunCheckpointService runCheckpointService;
+	private final EvalTraceRecorder evalTraceRecorder;
+	private final FeatureFlagService featureFlagService;
+	private final ToolCircuitBreaker toolCircuitBreaker;
+	private final AuditLogService auditLogService;
 	private final ActbrowProperties properties;
+	private static final String PROMPT_VERSION = "v1";
 	private final ObjectMapper objectMapper;
 	private final String defaultChatModel;
 	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
 	private final Set<String> cancelledRuns = ConcurrentHashMap.newKeySet();
-	private final Map<String, Set<String>> seenToolCalls = new ConcurrentHashMap<>();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
 		ConversationService conversationService, AssistantService assistantService, ToolService toolService,
-		ModelProvider modelProvider, RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
-		BuiltinServerToolExecutor builtinServerToolExecutor, HttpServerToolExecutor httpServerToolExecutor,
+		RunEventBroker eventBroker, PendingClientToolStore pendingClientToolStore,
 		NavigationFlowService navigationFlowService, KnowledgeSearchToolExecutor knowledgeSearchToolExecutor,
+		RunMemoryService runMemoryService,
+		RunPlanner runPlanner, RunExecutor runExecutor, RunVerifier runVerifier,
+		RunPolicyEngine runPolicyEngine, RunCheckpointService runCheckpointService,
+		EvalTraceRecorder evalTraceRecorder, FeatureFlagService featureFlagService,
+		ToolCircuitBreaker toolCircuitBreaker, AuditLogService auditLogService,
 		ActbrowProperties properties, ObjectMapper objectMapper,
 		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
 		this.runRepository = runRepository;
@@ -80,13 +87,19 @@ public class RunService {
 		this.conversationService = conversationService;
 		this.assistantService = assistantService;
 		this.toolService = toolService;
-		this.modelProvider = modelProvider;
 		this.eventBroker = eventBroker;
 		this.pendingClientToolStore = pendingClientToolStore;
-		this.builtinServerToolExecutor = builtinServerToolExecutor;
-		this.httpServerToolExecutor = httpServerToolExecutor;
 		this.navigationFlowService = navigationFlowService;
-		this.knowledgeSearchToolExecutor = knowledgeSearchToolExecutor;
+		this.runMemoryService = runMemoryService;
+		this.runPlanner = runPlanner;
+		this.runExecutor = runExecutor;
+		this.runVerifier = runVerifier;
+		this.runPolicyEngine = runPolicyEngine;
+		this.runCheckpointService = runCheckpointService;
+		this.evalTraceRecorder = evalTraceRecorder;
+		this.featureFlagService = featureFlagService;
+		this.toolCircuitBreaker = toolCircuitBreaker;
+		this.auditLogService = auditLogService;
 		this.properties = properties;
 		this.objectMapper = objectMapper;
 		this.defaultChatModel = defaultChatModel;
@@ -104,12 +117,18 @@ public class RunService {
 		run.setStatus(RunStatus.PENDING);
 		run.setStepCount(0);
 		RunEntity saved = runRepository.save(run);
+		runMemoryService.initializeForRun(saved, userContent);
 		return toResponse(saved);
 	}
 
 	public void ensureRunStarted(String runId) {
 		RunEntity run = requireRun(runId);
-		if (run.getStatus() != RunStatus.PENDING) {
+		RunStatus status = run.getStatus();
+		// Resume an interrupted run (process restarted mid-flight) if a durable checkpoint exists.
+		// processRun rebuilds working state from persisted conversation messages, so continuing is safe.
+		boolean resumable = (status == RunStatus.IN_PROGRESS || status == RunStatus.WAITING_FOR_CLIENT_TOOL)
+			&& runCheckpointService.find(runId).isPresent();
+		if (status != RunStatus.PENDING && !resumable) {
 			return;
 		}
 		if (!startedRuns.add(runId)) {
@@ -125,11 +144,14 @@ public class RunService {
 			return toResponse(run);
 		}
 		cancelledRuns.add(runId);
+		// Unblock a run parked in pendingClientToolStore.register(...).get(timeout) so cancellation
+		// takes effect immediately instead of waiting out the full tool timeout.
+		pendingClientToolStore.cancelByRunId(runId);
 		return toResponse(run);
 	}
 
 	public RunEntity requireRun(String runId) {
-		return runRepository.findById(runId).orElseThrow(() -> new IllegalArgumentException("Run not found"));
+		return runRepository.findById(runId).orElseThrow(() -> new NotFoundException("Run not found"));
 	}
 
 	public RunResponse getRun(String runId) {
@@ -156,9 +178,12 @@ public class RunService {
 			startedRuns.remove(runId);
 			eventBroker.dispose(runId);
 			runStepRepository.deleteByRunId(runId);
+			runMemoryService.deleteByRunId(runId);
+			runCheckpointService.clear(runId);
 		}
 		runRepository.deleteAll(runs);
 		conversationService.deleteMessagesAndConversation(conversationId);
+		runMemoryService.deleteByConversationId(conversationId);
 		for (RunEntity run : runs) {
 			cancelledRuns.remove(run.getId());
 		}
@@ -186,8 +211,9 @@ public class RunService {
 		try {
 			AssistantDefinitionEntity assistant = assistantService.requireEntity(run.getAssistantId());
 			List<ToolDescriptor> tools = toolService.listDescriptorsForAssistant(assistant.getId());
-			String systemPrompt = buildSystemPrompt(assistant, run.getConversationId());
+			RunToolFailureTracker failureTracker = new RunToolFailureTracker(objectMapper, properties.maxToolRetries());
 			boolean navigatedThisRun = false;
+			evalTraceRecorder.begin(run, PROMPT_VERSION, toolsetVersion(tools));
 
 			for (int stepIndex = 0; stepIndex < properties.maxSteps(); stepIndex++) {
 				if (cancelledRuns.contains(runId)) {
@@ -197,19 +223,27 @@ public class RunService {
 
 				run.setStepCount(stepIndex + 1);
 				runRepository.save(run);
+				runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.PLANNING, stepIndex);
 
 				String chatModel = model;
 				if (chatModel == null || chatModel.isBlank()) {
 					chatModel = defaultChatModel;
 				}
-				ModelDecision decision = modelProvider.decideNextStep(chatModel, systemPrompt,
-					conversationService.listMessages(run.getConversationId()), tools, stepIndex);
+				List<com.actbrow.actbrow.model.ConversationMessageEntity> messages = conversationService
+					.listMessages(run.getConversationId());
+				RunPlanner.PlanningOutcome planning = runPlanner.plan(chatModel, assistant, run, messages, tools,
+					stepIndex, buildSystemPrompt(assistant, run.getConversationId()),
+					failureTracker.buildRuntimeGuidance());
+				ModelDecision decision = planning.decision();
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
+				runMemoryService.recordModelDecision(run, decision, stepIndex);
+				evalTraceRecorder.recordPlanning(runId, decision.toString());
 
 				if (decision instanceof FinalResponseDecision finalResponse) {
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.ASSISTANT,
 						finalResponse.message());
 					recordStep(runId, stepIndex, RunStepType.FINAL_RESPONSE, finalResponse.message());
+					runMemoryService.recordFinalResponse(run, finalResponse.message());
 					Map<String, Object> completedPayload = new LinkedHashMap<>();
 					ClarificationResponseParser.ParsedClarification clarification = ClarificationResponseParser
 						.parse(finalResponse.message());
@@ -227,6 +261,8 @@ public class RunService {
 					run.setCompletedAt(Instant.now());
 					runRepository.save(run);
 					eventBroker.complete(runId);
+					runCheckpointService.clear(runId);
+					evalTraceRecorder.finalizeTrace(runId, "COMPLETED", latencyMs(run));
 					return;
 				}
 
@@ -237,6 +273,8 @@ public class RunService {
 					buildAssistantToolCallsJson(toolCallDecision.toolCalls()));
 
 				// Execute each tool call sequentially within this step
+				runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.EXECUTING, stepIndex);
+				String assistantId = assistant.getId();
 				for (ToolCall toolCall : toolCallDecision.toolCalls()) {
 					if (cancelledRuns.contains(runId)) {
 						cancelRunInternal(run);
@@ -249,6 +287,7 @@ public class RunService {
 					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
 					String executorKey = resolveExecutorKey(tool);
 					boolean deferNavigation = navigatedThisRun && isNavigateTool(tool);
+					ToolContract contract = ToolContract.from(tool);
 
 					ToolExecutionResult result;
 					if (deferNavigation) {
@@ -256,28 +295,65 @@ public class RunService {
 						result = navigationDeferredResult(tool.key());
 					}
 					else {
-						Map<String, Object> requestedPayload = new LinkedHashMap<>();
-						requestedPayload.put("toolCallId", toolCall.toolCallId());
-						requestedPayload.put("toolId", tool.id());
-						requestedPayload.put("toolKey", tool.key());
-						requestedPayload.put("executorKey", executorKey);
-						requestedPayload.put("type", wireToolTypeForClients(tool));
-						requestedPayload.put("arguments", executionArguments);
-						if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
-							requestedPayload.put("http", browserHttpPayload(tool, executionArguments));
+						// Production controls (Phase 7): kill switch, circuit breaker, shadow mode.
+						auditLogService.toolAttempt(runId, assistantId, tool.key());
+						String blockReason = null;
+						if (!featureFlagService.isEnabled(assistantId, FeatureFlagService.TOOLS_ENABLED)) {
+							blockReason = "tool execution is disabled for this assistant";
 						}
-						eventBroker.emit(runId, "tool.call.requested", requestedPayload);
-						recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
+						else if (!toolCircuitBreaker.allow(tool.key())) {
+							auditLogService.circuitOpen(runId, assistantId, tool.key());
+							blockReason = "tool circuit is open after repeated failures";
+						}
+						boolean shadow = blockReason == null && contract.isWrite()
+							&& featureFlagService.isEnabled(assistantId, FeatureFlagService.SHADOW_MODE);
 
-						result = executeTool(run, toolCall, tool, executionArguments);
-						if (result.success() && isNavigateTool(tool)) {
-							navigatedThisRun = true;
+						if (blockReason != null) {
+							recordStep(runId, stepIndex, RunStepType.TOOL_CALL,
+								toolCall.toString() + " [blocked: " + blockReason + "]");
+							result = syntheticBlocked(tool.key(), blockReason);
 						}
+						else if (shadow) {
+							auditLogService.shadowSkip(runId, assistantId, tool.key());
+							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [shadow]");
+							result = syntheticShadow(tool.key());
+						}
+						else {
+							Map<String, Object> requestedPayload = new LinkedHashMap<>();
+							requestedPayload.put("toolCallId", toolCall.toolCallId());
+							requestedPayload.put("toolId", tool.id());
+							requestedPayload.put("toolKey", tool.key());
+							requestedPayload.put("executorKey", executorKey);
+							requestedPayload.put("type", wireToolTypeForClients(tool));
+							requestedPayload.put("arguments", executionArguments);
+							if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
+								requestedPayload.put("http", browserHttpPayload(tool, executionArguments));
+							}
+							eventBroker.emit(runId, "tool.call.requested", requestedPayload);
+							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
+
+							RunExecutor.ExecutionOutcome execution = runExecutor.execute(run, toolCall, tool,
+								executionArguments, navigatedThisRun, failureTracker);
+							result = execution.result();
+							if (execution.navigated()) {
+								navigatedThisRun = true;
+							}
+							if (result.success()) {
+								toolCircuitBreaker.recordSuccess(tool.key());
+							}
+							else {
+								toolCircuitBreaker.recordFailure(tool.key());
+							}
+						}
+						auditLogService.toolOutcome(runId, assistantId, tool.key(), result.success(), result.error());
+						evalTraceRecorder.recordExecutionAttempt(runId);
 					}
+					failureTracker.recordResult(tool.key(), toolCallSignature(tool, executionArguments), result);
 					String toolMessage = toolResultContentForModel(result);
 					// Store TOOL message with its toolCallId so providers can pair it with the ASSISTANT entry
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
 						toolCall.toolCallId());
+					runMemoryService.recordToolResult(run, toolCall, tool, executionArguments, result, stepIndex);
 					recordStep(runId, stepIndex, RunStepType.TOOL_RESULT, result.toString());
 					Map<String, Object> payload = new LinkedHashMap<>();
 					payload.put("toolCallId", toolCall.toolCallId());
@@ -286,6 +362,24 @@ public class RunService {
 					payload.put("textSummary", result.textSummary());
 					payload.put("error", result.error());
 					eventBroker.emit(runId, "tool.call.completed", payload);
+					runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.VERIFYING, stepIndex);
+					RunVerifier.VerificationDecision verification = runVerifier.verify(tool, result);
+					recordStep(runId, stepIndex, RunStepType.VERIFIER_DECISION, verification.toString());
+					evalTraceRecorder.recordVerifier(runId, verification.toString());
+					// Deterministic recovery policy from the structured failure type. Recorded in the
+					// trace so recovery is code-driven and auditable; the planner still drives the next turn.
+					RunPolicyEngine.PolicyDecision policy = runPolicyEngine.decide(
+						verification.failureType(), tools.size() > 1);
+					recordStep(runId, stepIndex, RunStepType.POLICY_DECISION, policy.toString());
+					// Safer tool contracts (Phase 6): a successful write should be verified after the fact.
+					if (contract.requiresPostVerification() && result.success()) {
+						recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
+							"write tool '" + tool.key() + "' (sideEffect=" + contract.sideEffectLevel()
+								+ ") requires post-action verification");
+					}
+					if (verification.yieldToPlanner()) {
+						break;
+					}
 				}
 			}
 
@@ -300,69 +394,56 @@ public class RunService {
 				// Exception surfaced from a cancelled run — swallow to avoid writing to a deleted row.
 				return;
 			}
-			failRun(run, exception.getMessage(), exception);
+			// Log full detail server-side, but never surface raw internal errors (SQL, stack traces)
+			// to the client — the user-facing message stays generic.
+			failRun(run, "The assistant hit an unexpected error while processing this request.", exception);
 		}
 		finally {
 			startedRuns.remove(runId);
 			cancelledRuns.remove(runId);
-			seenToolCalls.remove(runId);
 		}
 	}
 
 	private void cancelRunInternal(RunEntity run) {
+		runCheckpointService.clear(run.getId());
+		evalTraceRecorder.finalizeTrace(run.getId(), "CANCELLED", latencyMs(run));
+		// If the run row was deleted mid-flight (e.g. conversation deleted), do not re-insert it.
+		if (!runRepository.existsById(run.getId())) {
+			return;
+		}
 		run.setStatus(RunStatus.CANCELLED);
 		run.setCompletedAt(Instant.now());
 		runRepository.save(run);
+		runMemoryService.recordRunFailure(run.getId(), "Run cancelled");
 		eventBroker.emit(run.getId(), "run.cancelled", Map.of());
 		eventBroker.complete(run.getId());
 	}
 
-	private ToolExecutionResult executeTool(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
-		Map<String, Object> executionArguments)
-		throws Exception {
-		String signature = toolCallSignature(tool, executionArguments);
-		Set<String> seen = seenToolCalls.computeIfAbsent(run.getId(), k -> ConcurrentHashMap.newKeySet());
-		if (!seen.add(signature)) {
-			String message = "You already called " + tool.key()
-				+ " with these exact arguments earlier in this run. The result will not change. "
-				+ "Stop calling tools and produce a final answer for the user instead.";
-			return new ToolExecutionResult(false, null, message, message);
+	/** A stable version marker for the current tool catalog, recorded on eval traces. */
+	private static String toolsetVersion(List<ToolDescriptor> tools) {
+		List<String> keys = tools.stream().map(ToolDescriptor::key).sorted().toList();
+		return "t" + Integer.toHexString(keys.hashCode());
+	}
+
+	private static long latencyMs(RunEntity run) {
+		if (run.getCreatedAt() == null) {
+			return 0L;
 		}
-		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())
-			|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
-			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
-			runRepository.save(run);
-			try {
-				ToolExecutionResult result = pendingClientToolStore.register(run.getId(), toolCall.toolCallId())
-					.get(properties.toolTimeout().toMillis(), TimeUnit.MILLISECONDS);
-				run.setStatus(RunStatus.IN_PROGRESS);
-				runRepository.save(run);
-				return result;
-			}
-			catch (TimeoutException e) {
-				// Client never posted a tool result (e.g. hard page refresh killed the SDK mid-navigation).
-				// Return a synthetic failure so the caller still appends a TOOL message paired with the
-				// assistant tool_calls entry. Without this, history would be left with an orphan tool_calls
-				// and OpenAI rejects the next turn.
-				pendingClientToolStore.cancel(toolCall.toolCallId());
-				run.setStatus(RunStatus.IN_PROGRESS);
-				runRepository.save(run);
-				String message = "Client tool '" + tool.key() + "' timed out after "
-					+ properties.toolTimeout().toMillis() + "ms. You did NOT receive any data from it. "
-					+ "Do not describe page content. Tell the user this tool could not complete and stop.";
-				return new ToolExecutionResult(false, null, message, message);
-			}
-		}
-		if (ToolCatalogPolicies.executesAsKnowledgeSearch(tool.type(), tool.executorRef())) {
-			log.info("LLM requested knowledge.search runId={} conversationId={} assistantId={} arguments={}",
-				run.getId(), run.getConversationId(), run.getAssistantId(), executionArguments);
-			return knowledgeSearchToolExecutor.execute(run.getAssistantId(),
-				mergeKnowledgeSearchArguments(run.getConversationId(), executionArguments));
-		}
-		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
-			return httpServerToolExecutor.execute(tool, executionArguments);
-		}
-		return builtinServerToolExecutor.execute(tool, executionArguments);
+		return Math.max(0L, System.currentTimeMillis() - run.getCreatedAt().toEpochMilli());
+	}
+
+	/** Result used when a tool is blocked by a production control (kill switch / open circuit). */
+	private static ToolExecutionResult syntheticBlocked(String toolKey, String reason) {
+		String message = "Tool '" + toolKey + "' was not run: " + reason
+			+ ". Choose a different tool or produce a final answer explaining the block.";
+		return new ToolExecutionResult(false, null, message, message);
+	}
+
+	/** Result used when shadow (observe-only) mode suppresses a write tool's execution. */
+	private static ToolExecutionResult syntheticShadow(String toolKey) {
+		String message = "Shadow mode: write tool '" + toolKey
+			+ "' was observed but not executed. Treat as if the action was recorded for review.";
+		return new ToolExecutionResult(true, null, message, null);
 	}
 
 	/**
@@ -399,7 +480,8 @@ public class RunService {
 		Map<String, Object> executionArguments) {
 		Map<String, Object> metadata = tool.metadata() == null ? Map.of() : tool.metadata();
 		String pathTemplate = String.valueOf(metadata.getOrDefault("path", "/"));
-		HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(pathTemplate,
+		String method = String.valueOf(metadata.getOrDefault("method", "GET"));
+		HttpToolRequestShaper.ShapedRequest shaped = HttpToolRequestShaper.shape(method, pathTemplate,
 			metadata.get("parameters"), executionArguments);
 
 		Map<String, Object> headers = new LinkedHashMap<>();
@@ -422,12 +504,7 @@ public class RunService {
 
 	private String toolCallSignature(ToolDescriptor tool, Map<String, Object> arguments) {
 		Map<String, Object> sortedArgs = arguments == null ? Map.of() : new java.util.TreeMap<>(arguments);
-		try {
-			return tool.key() + "|" + objectMapper.writeValueAsString(sortedArgs);
-		}
-		catch (JsonProcessingException e) {
-			return tool.key() + "|" + sortedArgs.toString();
-		}
+		return tool.key() + "|" + sortedArgs;
 	}
 
 	private String resolveExecutorKey(ToolDescriptor tool) {
@@ -452,32 +529,12 @@ public class RunService {
 		return merged;
 	}
 
-	private Map<String, Object> mergeKnowledgeSearchArguments(String conversationId,
-		Map<String, Object> executionArguments) {
-		Map<String, Object> merged = executionArguments == null ? new LinkedHashMap<>() : new LinkedHashMap<>(executionArguments);
-		Object path = merged.get("path");
-		if (path == null || String.valueOf(path).isBlank()) {
-			String currentPath = extractPathFromConversation(conversationId);
-			if (currentPath != null) {
-				merged.put("path", currentPath);
-			}
-		}
-		return merged;
-	}
-
-	private String extractPathFromConversation(String conversationId) {
-		var messages = conversationService.listMessages(conversationId);
-		for (int index = messages.size() - 1; index >= 0; index--) {
-			var message = messages.get(index);
-			if (message.getRole() != ConversationMessageRole.USER) {
-				continue;
-			}
-			String path = PageContextParser.extractPath(message.getContent());
-			if (path != null) {
-				return path;
-			}
-		}
-		return null;
+	private static ToolExecutionResult navigationDeferredResult(String toolKey) {
+		String message = "Navigation via " + toolKey + " was not performed. You already moved the user once this turn. "
+			+ "Stop calling navigation tools. Give a final answer that names the page they are on, briefly explains "
+			+ "what they can do here, and previews the next step (e.g. \"Next I'll take you to …\"). "
+			+ "Wait for the user's next message before navigating again.";
+		return new ToolExecutionResult(false, null, message, message);
 	}
 
 	private static boolean isNavigateTool(ToolDescriptor tool) {
@@ -487,14 +544,6 @@ public class RunService {
 			return true;
 		}
 		return executorRef == null || executorRef.isBlank() ? "app.navigate".equals(key) : false;
-	}
-
-	private static ToolExecutionResult navigationDeferredResult(String toolKey) {
-		String message = "Navigation via " + toolKey + " was not performed. You already moved the user once this turn. "
-			+ "Stop calling navigation tools. Give a final answer that names the page they are on, briefly explains "
-			+ "what they can do here, and previews the next step (e.g. \"Next I'll take you to …\"). "
-			+ "Wait for the user's next message before navigating again.";
-		return new ToolExecutionResult(false, null, message, message);
 	}
 
 	private static boolean isDedicatedClientNavigateTool(ToolDescriptor tool) {
@@ -547,20 +596,34 @@ public class RunService {
 		else {
 			log.error("Run {} failed: {}", run.getId(), error);
 		}
+		runCheckpointService.clear(run.getId());
+		evalTraceRecorder.finalizeTrace(run.getId(), "FAILED", latencyMs(run));
+		// If the run row was deleted mid-flight (e.g. conversation deleted), do not re-insert it.
+		if (!runRepository.existsById(run.getId())) {
+			return;
+		}
 		run.setStatus(RunStatus.FAILED);
 		run.setCompletedAt(Instant.now());
 		runRepository.save(run);
+		runMemoryService.recordRunFailure(run.getId(), error != null ? error : "Run failed");
 		eventBroker.emit(run.getId(), "run.failed", Map.of("message", error != null ? error : "Run failed"));
 		eventBroker.complete(run.getId());
 	}
 
 	private void recordStep(String runId, int stepIndex, RunStepType type, String payload) {
-		RunStepEntity step = new RunStepEntity();
-		step.setRunId(runId);
-		step.setStepIndex(stepIndex);
-		step.setType(type);
-		step.setPayload(payload);
-		runStepRepository.save(step);
+		// Trace steps are auxiliary — a failure to persist one must never abort the run or surface
+		// to the user. Log and continue.
+		try {
+			RunStepEntity step = new RunStepEntity();
+			step.setRunId(runId);
+			step.setStepIndex(stepIndex);
+			step.setType(type);
+			step.setPayload(payload);
+			runStepRepository.save(step);
+		}
+		catch (Exception exception) {
+			log.warn("Failed to record run step {} for run {} (non-fatal)", type, runId, exception);
+		}
 	}
 
 	private RunResponse toResponse(RunEntity run) {
@@ -608,6 +671,7 @@ public class RunService {
 			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
 			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in the most recent page.screenshot.visibleText OR in PAGE_CONTEXT. Knowledge search results are operator-provided facts, not observed page content — use them only for policies and product rules, never to describe what is on screen.\n")
 			.append("  3. If a tool fails or times out, tell the user honestly: which tool, what failed, and that you can't see the page. Do not improvise a description. Do not retry the same tool with the same arguments.\n")
+			.append("     3a. Tool failures do NOT automatically end the run. If the failure suggests a repair, continue with a corrected next action, a different tool, or one focused clarification.\n")
 			.append("  4. Call each observation tool (path.find, page.screenshot) AT MOST ONCE per user turn. Call knowledge.search AT MOST ONCE per user turn, and only when needed for operator-configured facts. After observation and any needed knowledge lookup, produce a final answer.\n")
 			.append("  5. NEVER call the same tool twice with the same arguments. The result will not change.\n")
 			.append("  6. If two observation calls have not given you what you need, stop calling tools. Give a final answer that says what you tried.\n")

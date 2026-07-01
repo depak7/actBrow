@@ -14,4 +14,6 @@ public interface AssistantToolBindingRepository extends JpaRepository<AssistantT
 	Optional<AssistantToolBindingEntity> findByAssistantIdAndToolId(String assistantId, String toolId);
 
 	List<AssistantToolBindingEntity> findAllByToolId(String toolId);
+
+	void deleteAllByAssistantId(String assistantId);
 }

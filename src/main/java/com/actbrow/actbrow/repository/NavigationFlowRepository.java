@@ -16,4 +16,6 @@ public interface NavigationFlowRepository extends JpaRepository<NavigationFlowEn
 	Optional<NavigationFlowEntity> findByAssistantIdAndId(String assistantId, String id);
 
 	Optional<NavigationFlowEntity> findByAssistant_IdAndName(String assistantId, String name);
+
+	void deleteAllByAssistant_Id(String assistantId);
 }

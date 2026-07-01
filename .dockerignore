@@ -1,0 +1,13 @@
+target/
+.git
+.gitignore
+.idea
+*.iml
+.DS_Store
+.qwen
+ui/node_modules
+ui/.next
+ui/out
+**/.env.local
+**/.env*.local
+agent-transcripts

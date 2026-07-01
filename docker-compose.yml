@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: actbrow
+      POSTGRES_USER: actbrow
+      POSTGRES_PASSWORD: actbrow
+    ports:
+      - "5432:5432"
+    volumes:
+      - actbrow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U actbrow -d actbrow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  actbrow:
+    build: .
+    image: actbrow:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/actbrow
+      SPRING_DATASOURCE_USERNAME: actbrow
+      SPRING_DATASOURCE_PASSWORD: actbrow
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      # Optional: LLM and OAuth (leave unset if not used)
+      # GEMINI_API_KEY: ""
+      # GROQ_API_KEY: ""
+      # GOOGLE_OAUTH_CLIENT_ID: ""
+      # Internal health ping (optional)
+      # ACTBROW_HEALTH_PING_ENABLED: "false"
+      # ACTBROW_HEALTH_PING_URL: "http://localhost:8080/health"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ui:
+    build:
+      context: ./ui
+      args:
+        # Baked into the client bundle at build time (browser loads the SDK from here).
+        NEXT_PUBLIC_ACTBROW_BASE_URL: http://localhost:8080
+    image: actbrow-ui:latest
+    ports:
+      - "3000:3000"
+    environment:
+      # Read by next.config.js at server startup — proxies /api/* to the backend service.
+      NEXT_PUBLIC_API_PROXY_TARGET: http://actbrow:8080
+    depends_on:
+      - actbrow
+
+volumes:
+  actbrow-pgdata:
