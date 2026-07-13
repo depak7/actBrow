@@ -38,3 +38,4 @@ docker-compose.override.yml
 .gstack/
 src/main/java/com/actbrow/actbrow/api/ClaudeCliProxyController.java
 src/main/java/com/actbrow/actbrow/service/ClaudeCliService.java
+src/test/java/com/actbrow/actbrow/service/ClaudeCliServiceTests.java
