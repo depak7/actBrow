@@ -1846,6 +1846,93 @@
       }
     }
 
+    var TOOL_CALLS_PREFIX = "[tool_calls]";
+    var TOOL_CALLS_SUFFIX = "[/tool_calls]";
+
+    /** Detects the ASSISTANT tool-calls marker message persisted by the server. */
+    function isToolCallsMessage(content) {
+      return typeof content === "string" && content.indexOf(TOOL_CALLS_PREFIX) === 0;
+    }
+
+    /** Parses the [tool_calls]...[/tool_calls] payload into {id, name, arguments} entries. */
+    function parseToolCallsMessage(content) {
+      try {
+        var start = content.indexOf(TOOL_CALLS_PREFIX) + TOOL_CALLS_PREFIX.length;
+        var end = content.lastIndexOf(TOOL_CALLS_SUFFIX);
+        var json = content.slice(start, end < 0 ? undefined : end);
+        var calls = JSON.parse(json);
+        if (!Array.isArray(calls)) return [];
+        return calls.map(function (call) {
+          var fn = call && call.function ? call.function : {};
+          var args = fn.arguments;
+          if (typeof args === "string") {
+            try { args = JSON.parse(args); } catch (e) { /* keep raw string */ }
+          }
+          return { id: call && call.id, name: fn.name, arguments: args };
+        });
+      } catch (e) {
+        return [];
+      }
+    }
+
+    /**
+     * Rebuilds a finalized (collapsed, completed) steps group from persisted history so a
+     * page reload shows the same tool-step UI as the live run, instead of raw tool-call JSON.
+     * `resultsById` maps a toolCallId to its persisted TOOL result content, when available.
+     */
+    function renderHistoricalSteps(calls, resultsById) {
+      if (!calls || !calls.length) return;
+      var row = appendRow("assistant", labels.activity || "Steps");
+      var box = document.createElement("div");
+      box.className = "actbrow-widget-steps";
+      var header = document.createElement("button");
+      header.type = "button";
+      header.className = "actbrow-widget-steps-header";
+      header.setAttribute("aria-expanded", "false");
+      var icon = document.createElement("span");
+      icon.className = "actbrow-widget-steps-icon";
+      icon.innerHTML = STEPS_ICON_DONE;
+      var title = document.createElement("span");
+      title.className = "actbrow-widget-steps-title";
+      title.textContent = "Used " + calls.length + " step" + (calls.length === 1 ? "" : "s");
+      var chevron = document.createElement("span");
+      chevron.className = "actbrow-widget-steps-chevron";
+      chevron.innerHTML = STEPS_CHEVRON;
+      header.appendChild(icon);
+      header.appendChild(title);
+      header.appendChild(chevron);
+      var list = document.createElement("div");
+      list.className = "actbrow-widget-steps-list";
+      box.appendChild(header);
+      box.appendChild(list);
+      row.appendChild(box);
+      header.addEventListener("click", function () {
+        var nowOpen = box.classList.toggle("is-open");
+        header.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+      });
+      calls.forEach(function (call) {
+        var item = document.createElement("div");
+        item.className = "actbrow-widget-step is-done";
+        var statusEl = document.createElement("span");
+        statusEl.className = "actbrow-widget-step-status";
+        statusEl.innerHTML = STEP_ICON_DONE;
+        var bodyEl = document.createElement("div");
+        bodyEl.className = "actbrow-widget-step-body";
+        var nameEl = document.createElement("div");
+        nameEl.className = "actbrow-widget-step-name";
+        nameEl.textContent = call.name || "tool";
+        var metaEl = document.createElement("div");
+        metaEl.className = "actbrow-widget-step-meta";
+        var result = call.id && resultsById ? resultsById[call.id] : null;
+        metaEl.textContent = truncateText(result || formatStepArgs(call.arguments) || "Completed", 240);
+        bodyEl.appendChild(nameEl);
+        bodyEl.appendChild(metaEl);
+        item.appendChild(statusEl);
+        item.appendChild(bodyEl);
+        list.appendChild(item);
+      });
+    }
+
     function removeThinkingRow() {
       if (thinkingRow && thinkingRow.parentNode) {
         thinkingRow.parentNode.removeChild(thinkingRow);
@@ -2019,14 +2106,41 @@
             .then(function (rows) {
               if (rows && rows.length) {
                 hasSubmittedMessage = true;
+                // Pre-index TOOL results by their call id so reconstructed steps can show summaries.
+                var resultsById = {};
+                rows.forEach(function (m) {
+                  if ((m.role || "").toUpperCase() === "TOOL" && m.toolCallId) {
+                    resultsById[m.toolCallId] = m.content;
+                  }
+                });
+                // A run can issue several tool-call rounds before its final answer. Live, they all
+                // land in one steps group, so accumulate consecutive tool-call rounds and flush the
+                // group when a plain message (user or assistant final answer) ends the run's turn.
+                var pendingSteps = [];
+                function flushSteps() {
+                  if (pendingSteps.length) {
+                    renderHistoricalSteps(pendingSteps, resultsById);
+                    pendingSteps = [];
+                  }
+                }
                 rows.forEach(function (m) {
                   var role = (m.role || "").toUpperCase();
                   if (role === "USER") {
+                    flushSteps();
                     appendMessage("user", m.content);
                   } else if (role === "ASSISTANT") {
-                    appendMessage("assistant", m.content);
+                    // Tool-call turns are persisted as ASSISTANT marker messages; render them as
+                    // a collapsed steps group (matching the live run) rather than raw JSON bubbles.
+                    if (isToolCallsMessage(m.content)) {
+                      pendingSteps = pendingSteps.concat(parseToolCallsMessage(m.content));
+                    } else {
+                      flushSteps();
+                      appendMessage("assistant", m.content);
+                    }
                   }
+                  // TOOL messages are folded into the steps group above and not shown standalone.
                 });
+                flushSteps();
                 scrollToBottom();
               } else {
                 addWelcomeIfNeeded();

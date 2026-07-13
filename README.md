@@ -4,6 +4,9 @@ Embeddable AI assistant for web apps: a Spring Boot backend + SDK that lets a co
 scan your repo and push tools, navigation flows, and knowledge live, plus a Next.js dashboard
 to manage assistants and a drop-in browser widget.
 
+**ActBrow is an [in-app AI agent runtime](https://actbrow.depak.dev)** — [embed an AI agent that navigates your app](https://actbrow.depak.dev/docs) with two script tags, no backend rewrite.
+See the [React example](https://actbrow.depak.dev/examples/react), [Vue example](https://actbrow.depak.dev/examples/vue), or [self-hosting guide](https://actbrow.depak.dev/self-hosting) · [Book a demo](https://actbrow.depak.dev/book-a-demo).
+
 - **Backend** — Spring Boot (Java 21), PostgreSQL, OpenAI-compatible model provider (OpenRouter,
   or a local Claude-CLI proxy for dev).
 - **UI** — Next.js dashboard (`ui/`) that proxies `/api/*` to the backend.

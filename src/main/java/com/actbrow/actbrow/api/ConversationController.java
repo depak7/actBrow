@@ -73,7 +73,8 @@ public class ConversationController {
 				if (m.getRole() == ConversationMessageRole.USER) {
 					content = UserMessageDisplay.stripStoredAppendix(content);
 				}
-				return new ConversationMessageResponse(m.getId(), m.getRole().name(), content, m.getCreatedAt());
+				return new ConversationMessageResponse(m.getId(), m.getRole().name(), content, m.getToolCallId(),
+					m.getCreatedAt());
 			})
 			.toList();
 	}
