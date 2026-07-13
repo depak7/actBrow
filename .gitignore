@@ -35,3 +35,6 @@ build/
 ### Docker ###
 # docker-compose.yml is the committed one-command dev stack; only local overrides are ignored.
 docker-compose.override.yml
+.gstack/
+src/main/java/com/actbrow/actbrow/api/ClaudeCliProxyController.java
+src/main/java/com/actbrow/actbrow/service/ClaudeCliService.java
