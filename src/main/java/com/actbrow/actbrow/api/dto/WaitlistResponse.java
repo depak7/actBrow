@@ -7,6 +7,7 @@ public record WaitlistResponse(
 	String email,
 	String name,
 	String company,
-	Instant createdAt
+	Instant createdAt,
+	boolean alreadyRegistered
 ) {
 }

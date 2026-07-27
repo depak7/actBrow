@@ -42,19 +42,22 @@ public class SignupNotificationService {
 
 	@Async
 	public void notifyNewWaitlist(WaitlistEntry entry) {
-		String body = "A new user just joined the actbrow waitlist.\n\n"
+		String body = "A new ActBrow demo request came in.\n\n"
 			+ "Email:     " + entry.getEmail() + "\n"
 			+ "Name:      " + orNone(entry.getName()) + "\n"
 			+ "Company:   " + orNone(entry.getCompany()) + "\n"
 			+ "Use case:  " + orNone(entry.getUseCase()) + "\n"
 			+ "Joined:    " + entry.getCreatedAt() + "\n";
-		send("New actbrow waitlist signup: " + entry.getEmail(), body, entry.getEmail());
+		send("New ActBrow demo request: " + entry.getEmail(), body, entry.getEmail());
 	}
 
 	/** Shared, fail-safe send. No-ops (with a log line) when disabled or unconfigured. */
 	private void send(String subject, String body, String contextEmail) {
 		if (!properties.signupEnabled()) {
-			log.debug("Signup notification disabled; skipping email for {}", contextEmail);
+			log.warn(
+				"Signup/demo notification DISABLED (SIGNUP_NOTIFY_ENABLED=false); "
+					+ "lead stored but no email sent for {}. Enable notify before launch traffic.",
+				contextEmail);
 			return;
 		}
 		String recipient = properties.signupRecipient();

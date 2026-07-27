@@ -19,29 +19,34 @@ public class WaitlistService {
 		this.signupNotificationService = signupNotificationService;
 	}
 
+	/**
+	 * Idempotent demo request: existing emails return success without a hard error,
+	 * so hunters/re-submits don't hit a rough "already registered" alert.
+	 */
 	public WaitlistResponse joinWaitlist(WaitlistRequest request) {
-		if (waitlistRepository.existsByEmail(request.email())) {
-			throw new IllegalArgumentException("Email already registered");
-		}
+		return waitlistRepository.findByEmail(request.email())
+			.map(existing -> toResponse(existing, true))
+			.orElseGet(() -> {
+				WaitlistEntry entry = new WaitlistEntry();
+				entry.setEmail(request.email());
+				entry.setName(request.name());
+				entry.setCompany(request.company());
+				entry.setUseCase(request.useCase());
 
-		WaitlistEntry entry = new WaitlistEntry();
-		entry.setEmail(request.email());
-		entry.setName(request.name());
-		entry.setCompany(request.company());
-		entry.setUseCase(request.useCase());
-
-		WaitlistEntry saved = waitlistRepository.save(entry);
-		signupNotificationService.notifyNewWaitlist(saved);
-		return toResponse(saved);
+				WaitlistEntry saved = waitlistRepository.save(entry);
+				signupNotificationService.notifyNewWaitlist(saved);
+				return toResponse(saved, false);
+			});
 	}
 
-	private WaitlistResponse toResponse(WaitlistEntry entry) {
+	private WaitlistResponse toResponse(WaitlistEntry entry, boolean alreadyRegistered) {
 		return new WaitlistResponse(
 			entry.getId(),
 			entry.getEmail(),
 			entry.getName(),
 			entry.getCompany(),
-			entry.getCreatedAt()
+			entry.getCreatedAt(),
+			alreadyRegistered
 		);
 	}
 }

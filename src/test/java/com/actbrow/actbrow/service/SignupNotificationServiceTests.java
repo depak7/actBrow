@@ -78,9 +78,9 @@ class SignupNotificationServiceTests {
 		SimpleMailMessage sent = captor.getValue();
 
 		assertThat(sent.getTo()).containsExactly("admin@example.com");
-		assertThat(sent.getSubject()).isEqualTo("New actbrow waitlist signup: bob@example.com");
+		assertThat(sent.getSubject()).isEqualTo("New ActBrow demo request: bob@example.com");
 		assertThat(sent.getText()).contains("bob@example.com").contains("Bob Example")
-			.contains("Acme Inc").contains("Customer support");
+			.contains("Acme Inc").contains("Customer support").contains("demo request");
 	}
 
 	@Test
