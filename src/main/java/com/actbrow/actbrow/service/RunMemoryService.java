@@ -172,6 +172,17 @@ public class RunMemoryService {
 	}
 
 	@Transactional
+	public void mergeSummary(RunEntity run, Map<String, Object> patch) {
+		RunMemoryEntity entity = requireOrInitialize(run);
+		Map<String, Object> summary = new LinkedHashMap<>(parseMap(entity.getSummaryJson()));
+		if (patch != null) {
+			summary.putAll(patch);
+		}
+		entity.setSummaryJson(toJson(summary));
+		runMemoryRepository.save(entity);
+	}
+
+	@Transactional
 	public void deleteByRunId(String runId) {
 		runMemoryRepository.deleteByRunId(runId);
 	}

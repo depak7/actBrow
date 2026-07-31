@@ -738,6 +738,57 @@
       } catch (e) {}
     }
 
+    // Tool calls this browser has already acted on. The run event stream replays its full history to
+    // every new subscriber, and EventSource reconnects on its own (network blip, sleep/wake, tab
+    // restore, or the page reload that app.navigate itself causes). Without this guard a replayed
+    // tool.call.requested would re-navigate the user or re-issue a browser HTTP write. Persisted in
+    // sessionStorage precisely because the navigation case destroys in-memory state.
+    var handledToolCallsStorageKey = "actbrow:handledToolCalls:" + config.assistantId;
+    var HANDLED_TOOL_CALL_LIMIT = 200;
+
+    function readHandledToolCalls() {
+      try {
+        var raw = sessionStorage.getItem(handledToolCallsStorageKey);
+        if (!raw) return [];
+        var parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function wasToolCallHandled(toolCallId) {
+      if (!toolCallId) {
+        return false;
+      }
+      return readHandledToolCalls().indexOf(toolCallId) !== -1;
+    }
+
+    /** Records the id BEFORE execution, so a rapid second replay cannot slip through. */
+    function markToolCallHandled(toolCallId) {
+      if (!toolCallId) {
+        return;
+      }
+      try {
+        var list = readHandledToolCalls();
+        if (list.indexOf(toolCallId) !== -1) {
+          return;
+        }
+        list.push(toolCallId);
+        // Bounded: keep the most recent ids so long sessions cannot grow storage without limit.
+        if (list.length > HANDLED_TOOL_CALL_LIMIT) {
+          list = list.slice(list.length - HANDLED_TOOL_CALL_LIMIT);
+        }
+        sessionStorage.setItem(handledToolCallsStorageKey, JSON.stringify(list));
+      } catch (e) {}
+    }
+
+    function clearHandledToolCalls() {
+      try {
+        sessionStorage.removeItem(handledToolCallsStorageKey);
+      } catch (e) {}
+    }
+
     function normalizeApiKey(key) {
       if (key == null) {
         return "";
@@ -789,6 +840,11 @@
       emitter.emit(data.eventType, data);
       if (data.eventType === "tool.call.requested" && data.payload.type === "BROWSER_HTTP") {
         var browserPayload = data.payload;
+        if (wasToolCallHandled(browserPayload.toolCallId)) {
+          debugLog(config, "skipping replayed browser http tool", browserPayload.toolCallId);
+          return;
+        }
+        markToolCallHandled(browserPayload.toolCallId);
         Promise.resolve()
           .then(function () {
             return executeBrowserHttpTool(browserPayload);
@@ -813,8 +869,13 @@
         return;
       }
       if (data.eventType === "tool.call.requested" && data.payload.type === "CLIENT") {
+        if (wasToolCallHandled(data.payload.toolCallId)) {
+          debugLog(config, "skipping replayed client tool", data.payload.toolCallId);
+          return;
+        }
         var resolvedToolKey = data.payload.executorKey || data.payload.toolKey;
         var handler = tools[resolvedToolKey];
+        markToolCallHandled(data.payload.toolCallId);
         if (!handler) {
           debugLog(config, "missing client tool handler", resolvedToolKey);
           postToolResult(runId, {
@@ -1008,7 +1069,8 @@
           source.close();
         } catch (e) {}
       }
-      ["run.started", "tool.call.requested", "tool.call.completed", "assistant.message.completed", "run.failed", "run.cancelled"]
+      ["run.started", "tool.call.requested", "tool.call.completed", "assistant.message.delta",
+        "assistant.message.completed", "run.failed", "run.cancelled"]
         .forEach(function (eventName) {
           source.addEventListener(eventName, function (event) {
             handleRunEvent(runId, event);
@@ -1066,6 +1128,7 @@
         clearStoredConversationId();
         clearStoredRunId();
         clearPendingResults();
+        clearHandledToolCalls();
         currentConversationId = null;
       },
       /**
@@ -1086,6 +1149,7 @@
         clearStoredConversationId();
         clearStoredRunId();
         clearPendingResults();
+        clearHandledToolCalls();
         currentConversationId = null;
         if (!id) {
           return Promise.resolve();
@@ -1288,6 +1352,11 @@
       ".actbrow-widget-thinking-dot:nth-child(3){animation-delay:0.3s;}",
       "@keyframes actbrow-dot-wave{0%,40%,100%{transform:translateY(0);opacity:.6;}20%{transform:translateY(-6px);opacity:1;box-shadow:0 3px 8px rgba(0,0,0,.3);}}",
 
+      "/* Streaming answer - blinking caret while tokens arrive */",
+      ".actbrow-widget-message-streaming::after{content:'';display:inline-block;width:2px;height:1em;margin-left:2px;vertical-align:text-bottom;background:currentColor;animation:actbrow-caret-blink 1s step-end infinite;}",
+      "@keyframes actbrow-caret-blink{0%,100%{opacity:1;}50%{opacity:0;}}",
+      "@media (prefers-reduced-motion:reduce){.actbrow-widget-message-streaming::after{animation:none;}}",
+
       "/* Tool Steps Group (collapsible per-turn) */",
       ".actbrow-widget-steps{max-width:95%;width:95%;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);overflow:hidden;}",
       ".actbrow-widget-steps-header{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;user-select:none;font-family:'Inter',sans-serif;color:#c8c8c8;font-size:11px;font-weight:600;letter-spacing:.01em;background:transparent;border:none;width:100%;text-align:left;transition:background .15s ease;}",
@@ -1352,7 +1421,10 @@
       "@media (prefers-color-scheme:dark){.actbrow-widget-launcher{background:#fff;color:#000;box-shadow:0 8px 32px rgba(255,255,255,.15);}.actbrow-widget-launcher:hover{background:#f5f5f5;}.actbrow-widget-launcher::before{background:linear-gradient(135deg,rgba(0,0,0,.1) 0%,rgba(0,0,0,.02) 100%);}.actbrow-widget-launcher::after{border-color:rgba(0,0,0,.15);}.actbrow-widget-panel{background:#1e1e1e;border-color:rgba(255,255,255,.08);box-shadow:0 32px 96px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.2);}.actbrow-widget-header{background:#252525;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-header::after{background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.06) 50%,transparent 100%);}.actbrow-widget-title{color:#e5e5e5;}.actbrow-widget-title-icon{background:#e5e5e5;}.actbrow-widget-title-icon svg{fill:#000;}.actbrow-widget-subtitle{color:#aaa;}.actbrow-widget-badge{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.3);}.actbrow-widget-badge-text{color:#4ade80;}.actbrow-widget-close{background:rgba(255,255,255,.08);color:#aaa;}.actbrow-widget-close:hover{background:rgba(255,255,255,.12);color:#e5e5e5;}.actbrow-widget-messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);}.actbrow-widget-messages::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.3);}.actbrow-widget-empty{background:#2a2a2a;border-color:rgba(255,255,255,.1);color:#ccc;}.actbrow-widget-empty-title{color:#e5e5e5;}.actbrow-widget-empty-desc{color:#aaa;}.actbrow-widget-suggestion{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.12);}.actbrow-widget-suggestion:hover{background:#303030;border-color:rgba(255,255,255,.18);}.actbrow-widget-suggestion-icon{background:#333;border-color:rgba(255,255,255,.1);}.actbrow-widget-suggestion-icon svg{fill:#e5e5e5;}.actbrow-widget-label{color:#555;}.actbrow-widget-message-assistant{background:#2a2a2a;color:#e5e5e5;border-color:rgba(255,255,255,.08);}.actbrow-widget-message code{background:rgba(255,255,255,.12);}.actbrow-widget-message a{color:#e5e5e5;}.actbrow-widget-message pre{background:#0a0a0a;color:#d4d4d4;border-color:rgba(255,255,255,.08);}.actbrow-widget-thinking-dot{background:#e5e5e5;}.actbrow-widget-message-thinking{background:#2a2a2a;border-color:rgba(255,255,255,.08);}.actbrow-widget-steps{background:#2a2a2a;border-color:rgba(255,255,255,.1);}.actbrow-widget-steps-header{color:#e5e5e5;}.actbrow-widget-steps-list{border-color:rgba(255,255,255,.08);}.actbrow-widget-step-name{color:#e5e5e5;}.actbrow-widget-step-meta{color:#aaa;}.actbrow-widget-status{color:#aaa;}.actbrow-widget-footer{background:#0a0a0a;border-color:rgba(255,255,255,.08);}.actbrow-widget-powered{color:#777;}.actbrow-widget-powered svg{fill:#777;}.actbrow-widget-form{background:#1a1a1a;border-color:rgba(255,255,255,.15);}.actbrow-widget-input{background:#252525;color:#e5e5e5;}.actbrow-widget-input::placeholder{color:#777;}.actbrow-widget-input:focus{background:#2a2a2a;}.actbrow-widget-send{background:#e5e5e5;color:#000;}.actbrow-widget-send:hover{background:#fff;box-shadow:0 3px 10px rgba(255,255,255,.2);}}"
     ].join(""), "actbrow-widget-styles-solid");
 
+    var theme = config.theme && typeof config.theme === "object" ? config.theme : {};
     var labels = config.labels || {};
+    if (theme.title && labels.title === undefined) labels.title = theme.title;
+    if (theme.subtitle && labels.subtitle === undefined) labels.subtitle = theme.subtitle;
     var suggestions = Array.isArray(config.suggestions)
       ? config.suggestions.filter(function (s) { return typeof s === "string" && s.trim(); })
       : [];
@@ -1363,6 +1435,9 @@
     var showEmptyState = config.hideEmptyState !== true;
     var root = document.createElement("div");
     root.className = "actbrow-widget-root";
+    if (theme.fontFamily) {
+      root.style.fontFamily = theme.fontFamily;
+    }
 
     // Launcher button with icon
     var launcher = document.createElement("button");
@@ -1371,12 +1446,26 @@
     launcher.setAttribute("aria-label", labels.open || "Open assistant");
     launcher.setAttribute("aria-expanded", "false");
     launcher.innerHTML = '<div class="actbrow-widget-launcher-icon"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg></div>';
+    if (theme.launcherBackground) launcher.style.background = theme.launcherBackground;
+    if (theme.accent) launcher.style.borderColor = theme.accent;
+    var launcherPosition = theme.launcherPosition === "bottom-left" ? "bottom-left" : "bottom-right";
+    if (launcherPosition === "bottom-left") {
+      launcher.style.left = "24px";
+      launcher.style.right = "auto";
+    }
 
     var panel = document.createElement("section");
     panel.className = "actbrow-widget-panel actbrow-widget-hidden";
     panel.setAttribute("aria-label", labels.title || "ActBrow Assistant");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
+    if (theme.panelBackground) panel.style.background = theme.panelBackground;
+    else if (theme.background) panel.style.background = theme.background;
+    if (theme.text) panel.style.color = theme.text;
+    if (launcherPosition === "bottom-left") {
+      panel.style.left = "24px";
+      panel.style.right = "auto";
+    }
 
     var resizeHandleTopLeft = document.createElement("div");
     resizeHandleTopLeft.className = "actbrow-widget-resize-handle actbrow-widget-resize-handle-tl";
@@ -1503,6 +1592,11 @@
     var isOpen = false;
     var isSending = false;
     var thinkingRow = null;
+    // Live token-streaming state for the in-flight assistant turn.
+    var streamingRow = null;
+    var streamingBody = null;
+    var streamingText = "";
+    var streamingStepIndex = null;
     var stepsState = null;
     var statusMode = "idle";
     var hasSubmittedMessage = false;
@@ -1940,6 +2034,57 @@
       thinkingRow = null;
     }
 
+    /**
+     * Live token streaming. Deltas render into a provisional bubble that is always superseded by the
+     * authoritative `assistant.message.completed` content (which may include OPTIONS buttons), and
+     * discarded outright if the turn turns out to be a tool call rather than a final answer.
+     */
+    function appendStreamingDelta(payload) {
+      if (!payload || typeof payload.delta !== "string" || !payload.delta) {
+        return;
+      }
+      // A new planning step supersedes any text streamed for a previous one.
+      if (streamingRow && streamingStepIndex !== payload.stepIndex) {
+        discardStreamingRow();
+      }
+      if (!streamingRow) {
+        removeThinkingRow();
+        streamingStepIndex = payload.stepIndex;
+        streamingText = "";
+        streamingRow = appendRow("assistant", labels.assistant || "Assistant");
+        streamingBody = document.createElement("div");
+        streamingBody.className =
+          "actbrow-widget-message actbrow-widget-message-assistant actbrow-widget-message-streaming";
+        streamingRow.appendChild(streamingBody);
+      }
+      streamingText += payload.delta;
+      // textContent, not innerHTML: streamed model output is untrusted.
+      streamingBody.textContent = stripOptionsMarkup(streamingText);
+      scrollToBottom();
+    }
+
+    /** Hides the OPTIONS:/RECOMMENDED: control lines while text is still streaming in. */
+    function stripOptionsMarkup(text) {
+      return String(text).split(/\r?\n/).filter(function (line) {
+        var trimmed = line.trim();
+        return trimmed.indexOf("OPTIONS:") !== 0 && trimmed.indexOf("RECOMMENDED:") !== 0;
+      }).join("\n");
+    }
+
+    function discardStreamingRow() {
+      if (streamingRow && streamingRow.parentNode) {
+        streamingRow.parentNode.removeChild(streamingRow);
+      }
+      streamingRow = null;
+      streamingBody = null;
+      streamingText = "";
+      streamingStepIndex = null;
+    }
+
+    function hasStreamedText() {
+      return !!streamingRow && streamingText.trim().length > 0;
+    }
+
     function ensureThinkingRow() {
       if (thinkingRow) {
         return;
@@ -1960,6 +2105,8 @@
       if (showEmptyState) {
         removeEmptyState();
       }
+      // Never carry a previous turn's provisional bubble into a new one.
+      discardStreamingRow();
       appendMessage("user", text);
       input.value = "";
       input.style.height = "auto";
@@ -2055,6 +2202,7 @@
     function beginNewConversation() {
       removeThinkingRow();
       thinkingRow = null;
+      discardStreamingRow();
       stepsState = null;
       while (messages.firstChild) {
         messages.removeChild(messages.firstChild);
@@ -2198,7 +2346,9 @@
 
     function defaultPanelLayout() {
       var size = clampPanelSize(340, 480);
-      var left = window.innerWidth - size.width - 24;
+      var left = launcherPosition === "bottom-left"
+        ? 24
+        : window.innerWidth - size.width - 24;
       var top = window.innerHeight - size.height - launcherGap - 24;
       return {
         left: left,
@@ -2421,8 +2571,17 @@
       beginNewConversation();
     });
 
+    client.on("assistant.message.delta", function (event) {
+      if (event && event.payload) {
+        appendStreamingDelta(event.payload);
+        setStatus("");
+      }
+    });
+
     client.on("tool.call.requested", function (event) {
       if (event && event.payload) {
+        // This turn is acting, not answering — any text streamed for it was preamble, not the answer.
+        discardStreamingRow();
         removeThinkingRow();
         setStatus("Running " + event.payload.toolKey + "...");
         addStepRequested(event.payload);
@@ -2438,6 +2597,9 @@
 
     client.on("assistant.message.completed", function (event) {
       removeThinkingRow();
+      // The completed payload is authoritative (and carries clarification options), so it always
+      // replaces the provisional streamed bubble rather than appending a second copy.
+      discardStreamingRow();
       finalizeStepsRow("completed");
       appendMessage("assistant", event.payload.content, event.payload);
       setStatus("");
@@ -2450,6 +2612,8 @@
         console.error("[ActBrow] run failed:", event && event.payload);
       }
       removeThinkingRow();
+      // A partially streamed answer is not a valid answer — drop it and show the error instead.
+      discardStreamingRow();
       finalizeStepsRow("failed");
       appendMessage("assistant", labels.errorMessage || "Sorry, something went wrong. Please try again.");
       setStatus("");
@@ -2458,8 +2622,15 @@
 
     client.on("run.cancelled", function () {
       removeThinkingRow();
+      // The user stopped mid-answer: keep what they already read, marked as interrupted.
+      var partial = hasStreamedText() ? stripOptionsMarkup(streamingText).trim() : null;
+      discardStreamingRow();
       finalizeStepsRow("cancelled");
-      appendMessage("assistant", labels.cancelledMessage || "Stopped.");
+      if (partial) {
+        appendMessage("assistant", partial + "\n\n" + (labels.cancelledMessage || "Stopped."));
+      } else {
+        appendMessage("assistant", labels.cancelledMessage || "Stopped.");
+      }
       setStatus("");
       setSendingState(false);
     });
@@ -2477,11 +2648,53 @@
       submitPrompt(text);
     });
 
+    function applyMagicLinkFromUrl() {
+      try {
+        if (!global.location || !global.location.search) return;
+        var params = new URLSearchParams(global.location.search);
+        var openFlag = params.get("actbrow_open") || params.get("actbrow");
+        var prompt = params.get("actbrow_prompt") || params.get("actbrow_q");
+        var autoSend = params.get("actbrow_send");
+        var shouldOpen = openFlag === "1" || openFlag === "true" || openFlag === "open"
+          || !!(prompt && prompt.trim());
+        if (!shouldOpen && !prompt) return;
+        openPanel();
+        if (prompt && prompt.trim()) {
+          var decoded = prompt.trim();
+          try { decoded = decodeURIComponent(prompt.trim()); } catch (e) { /* keep raw */ }
+          input.value = decoded;
+          resizeInput();
+          if (autoSend === "1" || autoSend === "true") {
+            setTimeout(function () { submitPrompt(decoded); }, 120);
+          } else {
+            input.focus();
+          }
+        }
+      } catch (err) {
+        if (config.debug && global.console && console.warn) {
+          console.warn("[ActBrow] magic link parse failed", err);
+        }
+      }
+    }
+
+    setTimeout(applyMagicLinkFromUrl, 0);
+
     return {
       client: client,
       open: openPanel,
       close: closePanel,
       beginNewConversation: beginNewConversation,
+      ask: function (text, options) {
+        openPanel();
+        if (!text) return;
+        if (options && options.send) {
+          submitPrompt(String(text));
+        } else {
+          input.value = String(text);
+          resizeInput();
+          input.focus();
+        }
+      },
       destroy: function () {
         root.remove();
       }
@@ -2489,7 +2702,7 @@
   }
 
   global.Actbrow = {
-    SDK_VERSION: "6",
+    SDK_VERSION: "8",
     createActbrowClient: createActbrowClient,
     createActbrowWidget: createActbrowWidget
   };

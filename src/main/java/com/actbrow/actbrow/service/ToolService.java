@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import java.util.Optional;
 
@@ -15,9 +16,11 @@ import com.actbrow.actbrow.agent.ToolDescriptor;
 import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.ToolRequest;
 import com.actbrow.actbrow.api.dto.ToolResponse;
+import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.model.AssistantToolBindingEntity;
 import com.actbrow.actbrow.model.ToolDefinitionEntity;
 import com.actbrow.actbrow.model.ToolType;
+import com.actbrow.actbrow.repository.AssistantRepository;
 import com.actbrow.actbrow.repository.AssistantToolBindingRepository;
 import com.actbrow.actbrow.repository.ToolRepository;
 
@@ -26,12 +29,14 @@ public class ToolService {
 
 	private final ToolRepository toolRepository;
 	private final AssistantToolBindingRepository bindingRepository;
+	private final AssistantRepository assistantRepository;
 	private final JsonSchemaValidator jsonSchemaValidator;
 
 	public ToolService(ToolRepository toolRepository, AssistantToolBindingRepository bindingRepository,
-		JsonSchemaValidator jsonSchemaValidator) {
+		AssistantRepository assistantRepository, JsonSchemaValidator jsonSchemaValidator) {
 		this.toolRepository = toolRepository;
 		this.bindingRepository = bindingRepository;
+		this.assistantRepository = assistantRepository;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 	}
 
@@ -143,6 +148,47 @@ public class ToolService {
 				entity.getExecutorRef()))
 			.map(this::toResponse)
 			.toList();
+	}
+
+	/** Tools attached to any assistant owned by the user (plus unbound non-platform tools they created via attach flows). */
+	public List<ToolResponse> listForUser(String userId) {
+		Set<String> ownedAssistantIds = assistantRepository.findAllByUserId(userId).stream()
+			.map(AssistantDefinitionEntity::getId)
+			.collect(Collectors.toSet());
+		Set<String> toolIds = new LinkedHashSet<>();
+		for (String assistantId : ownedAssistantIds) {
+			for (AssistantToolBindingEntity binding : bindingRepository.findAllByAssistantId(assistantId)) {
+				toolIds.add(binding.getToolId());
+			}
+		}
+		return toolIds.stream()
+			.map(this::requireEntity)
+			.filter(entity -> !ToolCatalogPolicies.isPlatformCatalogTool(entity.getType(), entity.getKey(),
+				entity.getExecutorRef()))
+			.map(this::toResponse)
+			.toList();
+	}
+
+	/**
+	 * Ensures the tool is only mutated if it is attached solely to the caller's assistants,
+	 * or not attached to any assistant yet.
+	 */
+	public ToolDefinitionEntity requireOwnedOrUnboundTool(String toolId, String userId) {
+		ToolDefinitionEntity tool = requireEntity(toolId);
+		List<AssistantToolBindingEntity> bindings = bindingRepository.findAllByToolId(toolId);
+		if (bindings.isEmpty()) {
+			return tool;
+		}
+		Set<String> ownedAssistantIds = assistantRepository.findAllByUserId(userId).stream()
+			.map(AssistantDefinitionEntity::getId)
+			.collect(Collectors.toSet());
+		boolean foreign = bindings.stream()
+			.map(AssistantToolBindingEntity::getAssistantId)
+			.anyMatch(assistantId -> !ownedAssistantIds.contains(assistantId));
+		if (foreign) {
+			throw new NotFoundException("Tool not found");
+		}
+		return tool;
 	}
 
 	public List<ToolResponse> listAssistantTools(String assistantId) {

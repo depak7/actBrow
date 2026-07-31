@@ -64,11 +64,12 @@ public class RunService {
 	private final FeatureFlagService featureFlagService;
 	private final ToolCircuitBreaker toolCircuitBreaker;
 	private final AuditLogService auditLogService;
+	private final ProgressiveToolDisclosureService progressiveToolDisclosureService;
 	private final ActbrowProperties properties;
 	private static final String PROMPT_VERSION = "v1";
 	private final ObjectMapper objectMapper;
 	private final String defaultChatModel;
-	private final Set<String> startedRuns = ConcurrentHashMap.newKeySet();
+	// Fast in-process cancel signal only; cross-instance cancellation is observed via run status in the DB.
 	private final Set<String> cancelledRuns = ConcurrentHashMap.newKeySet();
 
 	public RunService(RunRepository runRepository, RunStepRepository runStepRepository,
@@ -80,6 +81,7 @@ public class RunService {
 		RunPolicyEngine runPolicyEngine, RunCheckpointService runCheckpointService,
 		EvalTraceRecorder evalTraceRecorder, FeatureFlagService featureFlagService,
 		ToolCircuitBreaker toolCircuitBreaker, AuditLogService auditLogService,
+		ProgressiveToolDisclosureService progressiveToolDisclosureService,
 		ActbrowProperties properties, ObjectMapper objectMapper,
 		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
 		this.runRepository = runRepository;
@@ -100,6 +102,7 @@ public class RunService {
 		this.featureFlagService = featureFlagService;
 		this.toolCircuitBreaker = toolCircuitBreaker;
 		this.auditLogService = auditLogService;
+		this.progressiveToolDisclosureService = progressiveToolDisclosureService;
 		this.properties = properties;
 		this.objectMapper = objectMapper;
 		this.defaultChatModel = defaultChatModel;
@@ -118,25 +121,84 @@ public class RunService {
 		run.setStepCount(0);
 		RunEntity saved = runRepository.save(run);
 		runMemoryService.initializeForRun(saved, userContent);
+		// Execution starts immediately — it must not depend on a client opening the SSE stream.
+		ensureRunStarted(saved.getId());
 		return toResponse(saved);
 	}
 
+	/**
+	 * Idempotent, multi-instance-safe run start. Ownership is a single atomic UPDATE in the database
+	 * (PENDING → IN_PROGRESS with a heartbeat), so concurrent callers — the create path, the SSE
+	 * endpoint, the recovery poller, or another instance — race safely: exactly one wins.
+	 *
+	 * An in-flight run whose owner stopped heartbeating is resumed only when its checkpoint proves it
+	 * was interrupted while PLANNING (no tool dispatch in flight). Interruption mid-EXECUTING may mean
+	 * a side effect already happened; re-running it could double a write, so the run fails honestly.
+	 */
 	public void ensureRunStarted(String runId) {
 		RunEntity run = requireRun(runId);
 		RunStatus status = run.getStatus();
-		// Resume an interrupted run (process restarted mid-flight) if a durable checkpoint exists.
-		// processRun rebuilds working state from persisted conversation messages, so continuing is safe.
-		boolean resumable = (status == RunStatus.IN_PROGRESS || status == RunStatus.WAITING_FOR_CLIENT_TOOL)
-			&& runCheckpointService.find(runId).isPresent();
-		if (status != RunStatus.PENDING && !resumable) {
+		if (status == RunStatus.COMPLETED || status == RunStatus.FAILED || status == RunStatus.CANCELLED) {
 			return;
 		}
-		if (!startedRuns.add(runId)) {
+		Instant now = Instant.now();
+		Instant staleBefore = now.minus(staleClaimWindow());
+		if (status != RunStatus.PENDING) {
+			if (run.getClaimedAt() != null && !run.getClaimedAt().isBefore(staleBefore)) {
+				// A live worker owns this run — nothing to do.
+				return;
+			}
+			boolean writeSafeToResume = runCheckpointService.find(runId)
+				.map(checkpoint -> checkpoint.getPhase() == RunPhase.PLANNING)
+				.orElse(false);
+			if (!writeSafeToResume) {
+				// Claim the orphan so only one instance settles it, then fail it honestly.
+				if (runRepository.claimForExecution(runId, now, staleBefore) == 1) {
+					failRun(run, "The assistant was interrupted while performing an action "
+						+ "and could not safely resume. Please try again.");
+				}
+				return;
+			}
+		}
+		if (runRepository.claimForExecution(runId, now, staleBefore) == 0) {
 			return;
 		}
 		Thread.startVirtualThread(() -> processRun(runId));
 	}
 
+	/**
+	 * Recovers orphaned runs: PENDING rows whose creator died before claiming them, and in-flight
+	 * runs whose worker stopped heartbeating. {@link #ensureRunStarted} applies the write-safety rule.
+	 */
+	@org.springframework.scheduling.annotation.Scheduled(initialDelay = 30_000, fixedDelay = 30_000)
+	public void recoverOrphanedRuns() {
+		Instant now = Instant.now();
+		List<RunEntity> orphans = new java.util.ArrayList<>();
+		orphans.addAll(runRepository.findByStatusAndCreatedAtBefore(RunStatus.PENDING, now.minusSeconds(15)));
+		orphans.addAll(runRepository.findOrphanedInFlight(
+			List.of(RunStatus.IN_PROGRESS, RunStatus.WAITING_FOR_CLIENT_TOOL), now.minus(staleClaimWindow())));
+		for (RunEntity orphan : orphans) {
+			try {
+				ensureRunStarted(orphan.getId());
+			}
+			catch (Exception exception) {
+				log.warn("Failed to recover orphaned run {}", orphan.getId(), exception);
+			}
+		}
+	}
+
+	/**
+	 * How long a heartbeat may be silent before the run counts as orphaned. Must comfortably exceed
+	 * both the client-tool wait (no heartbeat while parked on the pending-tool future) and a slow
+	 * model call, otherwise a healthy run could be double-claimed.
+	 */
+	private java.time.Duration staleClaimWindow() {
+		java.time.Duration toolWindow = properties.toolTimeout().plusSeconds(60);
+		java.time.Duration floor = java.time.Duration.ofMinutes(5);
+		return toolWindow.compareTo(floor) > 0 ? toolWindow : floor;
+	}
+
+	@Transactional
 	public RunResponse cancelRun(String runId) {
 		RunEntity run = requireRun(runId);
 		RunStatus status = run.getStatus();
@@ -144,10 +206,18 @@ public class RunService {
 			return toResponse(run);
 		}
 		cancelledRuns.add(runId);
+		// Terminal CAS: only flips the run if it is still active, so a concurrent worker completing
+		// the run cannot be overwritten — and once CANCELLED, the worker's own terminal CAS loses.
+		boolean won = runRepository.finishIfActive(runId, RunStatus.CANCELLED, "Cancelled by client",
+			Instant.now()) == 1;
 		// Unblock a run parked in pendingClientToolStore.register(...).get(timeout) so cancellation
 		// takes effect immediately instead of waiting out the full tool timeout.
 		pendingClientToolStore.cancelByRunId(runId);
-		return toResponse(run);
+		if (won) {
+			eventBroker.emit(runId, "run.cancelled", Map.of());
+			eventBroker.complete(runId);
+		}
+		return toResponse(requireRun(runId));
 	}
 
 	public RunEntity requireRun(String runId) {
@@ -175,7 +245,6 @@ public class RunService {
 			String runId = run.getId();
 			cancelledRuns.add(runId);
 			pendingClientToolStore.cancelByRunId(runId);
-			startedRuns.remove(runId);
 			eventBroker.dispose(runId);
 			runStepRepository.deleteByRunId(runId);
 			runMemoryService.deleteByRunId(runId);
@@ -191,13 +260,31 @@ public class RunService {
 
 	public void submitClientToolResult(String runId, String toolCallId, ToolExecutionResult result) {
 		requireRun(runId);
-		pendingClientToolStore.complete(toolCallId, result);
+		pendingClientToolStore.complete(runId, toolCallId, result);
+	}
+
+	private boolean isCancelled(String runId) {
+		if (cancelledRuns.contains(runId)) {
+			return true;
+		}
+		return runRepository.findById(runId)
+			.map(run -> run.getStatus() == RunStatus.CANCELLED)
+			.orElse(true);
+	}
+
+	/**
+	 * In-memory-only cancellation check, for hot paths that run many times per step (token deltas).
+	 * Deliberately skips the database read in {@link #isCancelled}: emitting a few extra cosmetic
+	 * deltas after a cancel is harmless, whereas a query per token is not.
+	 */
+	private boolean isCancelledFast(String runId) {
+		return cancelledRuns.contains(runId);
 	}
 
 	private void processRun(String runId) {
 		RunEntity run = requireRun(runId);
 
-		if (cancelledRuns.contains(runId)) {
+		if (isCancelled(runId)) {
 			cancelRunInternal(run);
 			return;
 		}
@@ -205,41 +292,86 @@ public class RunService {
 		eventBroker.emit(runId, "run.started", Map.of(
 			"assistantId", run.getAssistantId(),
 			"conversationId", run.getConversationId()));
-		run.setStatus(RunStatus.IN_PROGRESS);
-		runRepository.save(run);
+		// Status is already IN_PROGRESS: the claim in ensureRunStarted performed that transition
+		// atomically. No blind entity save here — it could overwrite a concurrent cancellation.
 
 		try {
 			AssistantDefinitionEntity assistant = assistantService.requireEntity(run.getAssistantId());
-			List<ToolDescriptor> tools = toolService.listDescriptorsForAssistant(assistant.getId());
+			List<ToolDescriptor> catalog = toolService.listDescriptorsForAssistant(assistant.getId());
 			RunToolFailureTracker failureTracker = new RunToolFailureTracker(objectMapper, properties.maxToolRetries());
 			boolean navigatedThisRun = false;
-			evalTraceRecorder.begin(run, PROMPT_VERSION, toolsetVersion(tools));
+			// Deterministic policy escalation: once set, the next planner turn runs with no tools so
+			// the model must produce an honest final answer instead of continuing to act.
+			boolean forceFinalAnswer = false;
+			String forceFinalReason = null;
+			evalTraceRecorder.begin(run, PROMPT_VERSION, toolsetVersion(catalog));
+
+			// The assistant's configured model wins; fall back to the deployment default.
+			String chatModel = assistant.getModel();
+			if (chatModel == null || chatModel.isBlank()) {
+				chatModel = model;
+			}
+			if (chatModel == null || chatModel.isBlank()) {
+				chatModel = defaultChatModel;
+			}
 
 			for (int stepIndex = 0; stepIndex < properties.maxSteps(); stepIndex++) {
-				if (cancelledRuns.contains(runId)) {
+				if (isCancelled(runId)) {
 					cancelRunInternal(run);
 					return;
 				}
 
-				run.setStepCount(stepIndex + 1);
-				runRepository.save(run);
+				// Heartbeat + step counter in one guarded update; zero rows means the run was
+				// cancelled or deleted out from under us — stop instead of overwriting that state.
+				if (runRepository.recordProgress(runId, stepIndex + 1, Instant.now()) == 0) {
+					cancelRunInternal(run);
+					return;
+				}
 				runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.PLANNING, stepIndex);
 
-				String chatModel = model;
-				if (chatModel == null || chatModel.isBlank()) {
-					chatModel = defaultChatModel;
-				}
 				List<com.actbrow.actbrow.model.ConversationMessageEntity> messages = conversationService
 					.listMessages(run.getConversationId());
+				List<ToolDescriptor> tools = forceFinalAnswer
+					? List.of()
+					: progressiveToolDisclosureService.selectForPlanning(run, catalog);
+				String runtimeGuidance = failureTracker.buildRuntimeGuidance();
+				if (forceFinalAnswer) {
+					runtimeGuidance += "POLICY DECISION (deterministic, non-negotiable): tool execution for this "
+						+ "run has been stopped — " + forceFinalReason + " No tools are available this turn. "
+						+ "Produce an honest final answer: state plainly what was attempted, what failed or is "
+						+ "blocked, and what the user can do next. Do not invent results.\n\n";
+				}
+				// Stream text tokens to the client as they are generated. Deltas are advisory UI
+				// output: the authoritative content is still the decision returned below, and a
+				// cancelled run stops emitting immediately.
+				final int deltaStepIndex = stepIndex;
+				java.util.concurrent.atomic.AtomicInteger deltaSequence = new java.util.concurrent.atomic.AtomicInteger();
+				java.util.function.Consumer<String> onTextDelta = delta -> {
+					// Fast path only: this runs once per token, so it must not touch the database.
+					if (isCancelledFast(runId)) {
+						return;
+					}
+					Map<String, Object> deltaPayload = new LinkedHashMap<>();
+					deltaPayload.put("stepIndex", deltaStepIndex);
+					deltaPayload.put("sequence", deltaSequence.getAndIncrement());
+					deltaPayload.put("delta", delta);
+					eventBroker.emit(runId, "assistant.message.delta", deltaPayload);
+				};
 				RunPlanner.PlanningOutcome planning = runPlanner.plan(chatModel, assistant, run, messages, tools,
 					stepIndex, buildSystemPrompt(assistant, run.getConversationId()),
-					failureTracker.buildRuntimeGuidance());
+					runtimeGuidance, onTextDelta);
 				ModelDecision decision = planning.decision();
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 				runMemoryService.recordModelDecision(run, decision, stepIndex);
 				evalTraceRecorder.recordPlanning(runId, decision.toString());
 
 				if (decision instanceof FinalResponseDecision finalResponse) {
+					// Win the terminal transition BEFORE publishing the answer: if a concurrent
+					// cancel already flipped the run, the cancellation is final and we stay silent.
+					if (runRepository.finishIfActive(runId, RunStatus.COMPLETED, null, Instant.now()) == 0) {
+						cancelRunInternal(run);
+						return;
+					}
 					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.ASSISTANT,
 						finalResponse.message());
 					recordStep(runId, stepIndex, RunStepType.FINAL_RESPONSE, finalResponse.message());
@@ -257,9 +389,6 @@ public class RunService {
 						completedPayload.put("content", finalResponse.message());
 					}
 					eventBroker.emit(runId, "assistant.message.completed", completedPayload);
-					run.setStatus(RunStatus.COMPLETED);
-					run.setCompletedAt(Instant.now());
-					runRepository.save(run);
 					eventBroker.complete(runId);
 					runCheckpointService.clear(runId);
 					evalTraceRecorder.finalizeTrace(runId, "COMPLETED", latencyMs(run));
@@ -276,14 +405,11 @@ public class RunService {
 				runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.EXECUTING, stepIndex);
 				String assistantId = assistant.getId();
 				for (ToolCall toolCall : toolCallDecision.toolCalls()) {
-					if (cancelledRuns.contains(runId)) {
+					if (isCancelled(runId)) {
 						cancelRunInternal(run);
 						return;
 					}
-					ToolDescriptor tool = tools.stream()
-						.filter(item -> item.id().equals(toolCall.toolId()))
-						.findFirst()
-						.orElseThrow(() -> new IllegalArgumentException("Unknown tool requested by model: " + toolCall.toolKey()));
+					ToolDescriptor tool = resolveTool(tools, catalog, toolCall);
 					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
 					String executorKey = resolveExecutorKey(tool);
 					boolean deferNavigation = navigatedThisRun && isNavigateTool(tool);
@@ -301,7 +427,9 @@ public class RunService {
 						if (!featureFlagService.isEnabled(assistantId, FeatureFlagService.TOOLS_ENABLED)) {
 							blockReason = "tool execution is disabled for this assistant";
 						}
-						else if (!toolCircuitBreaker.allow(tool.key())) {
+						// Circuits are scoped per assistant so one tenant's failing tool can never
+						// open the circuit for every other tenant sharing the same tool key.
+						else if (!toolCircuitBreaker.allow(circuitKey(assistantId, tool))) {
 							auditLogService.circuitOpen(runId, assistantId, tool.key());
 							blockReason = "tool circuit is open after repeated failures";
 						}
@@ -339,10 +467,10 @@ public class RunService {
 								navigatedThisRun = true;
 							}
 							if (result.success()) {
-								toolCircuitBreaker.recordSuccess(tool.key());
+								toolCircuitBreaker.recordSuccess(circuitKey(assistantId, tool));
 							}
 							else {
-								toolCircuitBreaker.recordFailure(tool.key());
+								toolCircuitBreaker.recordFailure(circuitKey(assistantId, tool));
 							}
 						}
 						auditLogService.toolOutcome(runId, assistantId, tool.key(), result.success(), result.error());
@@ -371,6 +499,13 @@ public class RunService {
 					RunPolicyEngine.PolicyDecision policy = runPolicyEngine.decide(
 						verification.failureType(), tools.size() > 1);
 					recordStep(runId, stepIndex, RunStepType.POLICY_DECISION, policy.toString());
+					// The policy decision is control flow, not just a trace entry: terminal outcomes
+					// strip the toolset for the next planner turn, forcing an honest final answer.
+					if (policy.action() == RunPolicyEngine.PolicyAction.STOP_WITH_EXPLANATION
+						|| policy.action() == RunPolicyEngine.PolicyAction.REQUIRE_USER_INTERVENTION) {
+						forceFinalAnswer = true;
+						forceFinalReason = policy.rationale();
+					}
 					// Safer tool contracts (Phase 6): a successful write should be verified after the fact.
 					if (contract.requiresPostVerification() && result.success()) {
 						recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
@@ -390,7 +525,7 @@ public class RunService {
 			// The conversation and run rows are already gone — do not attempt any further DB writes.
 		}
 		catch (Exception exception) {
-			if (cancelledRuns.contains(runId)) {
+			if (isCancelled(runId)) {
 				// Exception surfaced from a cancelled run — swallow to avoid writing to a deleted row.
 				return;
 			}
@@ -399,7 +534,6 @@ public class RunService {
 			failRun(run, "The assistant hit an unexpected error while processing this request.", exception);
 		}
 		finally {
-			startedRuns.remove(runId);
 			cancelledRuns.remove(runId);
 		}
 	}
@@ -411,15 +545,34 @@ public class RunService {
 		if (!runRepository.existsById(run.getId())) {
 			return;
 		}
-		run.setStatus(RunStatus.CANCELLED);
-		run.setCompletedAt(Instant.now());
-		runRepository.save(run);
-		runMemoryService.recordRunFailure(run.getId(), "Run cancelled");
-		eventBroker.emit(run.getId(), "run.cancelled", Map.of());
+		// Terminal CAS: a no-op when another party already finished the run (their outcome stands).
+		if (runRepository.finishIfActive(run.getId(), RunStatus.CANCELLED, "Cancelled by client",
+			Instant.now()) == 1) {
+			runMemoryService.recordRunFailure(run.getId(), "Run cancelled");
+			eventBroker.emit(run.getId(), "run.cancelled", Map.of());
+		}
 		eventBroker.complete(run.getId());
 	}
 
 	/** A stable version marker for the current tool catalog, recorded on eval traces. */
+	private static ToolDescriptor resolveTool(List<ToolDescriptor> active, List<ToolDescriptor> catalog,
+		ToolCall toolCall) {
+		return active.stream()
+			.filter(item -> matchesTool(item, toolCall))
+			.findFirst()
+			.or(() -> catalog.stream().filter(item -> matchesTool(item, toolCall)).findFirst())
+			.or(() -> ProgressiveToolDisclosureService.metaToolByKey(toolCall.toolKey()))
+			.orElseThrow(() -> new IllegalArgumentException(
+				"Unknown tool requested by model: " + toolCall.toolKey()));
+	}
+
+	private static boolean matchesTool(ToolDescriptor item, ToolCall toolCall) {
+		if (toolCall.toolKey() != null && toolCall.toolKey().equals(item.key())) {
+			return true;
+		}
+		return item.id() != null && item.id().equals(toolCall.toolId());
+	}
+
 	private static String toolsetVersion(List<ToolDescriptor> tools) {
 		List<String> keys = tools.stream().map(ToolDescriptor::key).sorted().toList();
 		return "t" + Integer.toHexString(keys.hashCode());
@@ -505,6 +658,11 @@ public class RunService {
 	private String toolCallSignature(ToolDescriptor tool, Map<String, Object> arguments) {
 		Map<String, Object> sortedArgs = arguments == null ? Map.of() : new java.util.TreeMap<>(arguments);
 		return tool.key() + "|" + sortedArgs;
+	}
+
+	/** Circuit-breaker scope: per assistant + tool, so failures never bleed across tenants. */
+	private static String circuitKey(String assistantId, ToolDescriptor tool) {
+		return assistantId + "|" + tool.key();
 	}
 
 	private String resolveExecutorKey(ToolDescriptor tool) {
@@ -598,13 +756,12 @@ public class RunService {
 		}
 		runCheckpointService.clear(run.getId());
 		evalTraceRecorder.finalizeTrace(run.getId(), "FAILED", latencyMs(run));
-		// If the run row was deleted mid-flight (e.g. conversation deleted), do not re-insert it.
-		if (!runRepository.existsById(run.getId())) {
+		// Terminal CAS: no-ops when the run row is gone or another party already finished the run,
+		// so a failure can never overwrite a completion or cancellation.
+		if (runRepository.finishIfActive(run.getId(), RunStatus.FAILED,
+			error != null ? error : "Run failed", Instant.now()) == 0) {
 			return;
 		}
-		run.setStatus(RunStatus.FAILED);
-		run.setCompletedAt(Instant.now());
-		runRepository.save(run);
 		runMemoryService.recordRunFailure(run.getId(), error != null ? error : "Run failed");
 		eventBroker.emit(run.getId(), "run.failed", Map.of("message", error != null ? error : "Run failed"));
 		eventBroker.complete(run.getId());

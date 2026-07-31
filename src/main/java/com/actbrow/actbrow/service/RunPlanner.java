@@ -25,9 +25,20 @@ public class RunPlanner {
 	public PlanningOutcome plan(String chatModel, AssistantDefinitionEntity assistant, RunEntity run,
 		List<ConversationMessageEntity> messages, List<ToolDescriptor> tools, int stepIndex,
 		String baseSystemPrompt, String runtimeGuidance) {
+		return plan(chatModel, assistant, run, messages, tools, stepIndex, baseSystemPrompt, runtimeGuidance, null);
+	}
+
+	/**
+	 * @param onTextDelta optional sink for incremental text chunks; when non-null the provider streams
+	 *                    tokens as they are generated. The returned decision stays authoritative.
+	 */
+	public PlanningOutcome plan(String chatModel, AssistantDefinitionEntity assistant, RunEntity run,
+		List<ConversationMessageEntity> messages, List<ToolDescriptor> tools, int stepIndex,
+		String baseSystemPrompt, String runtimeGuidance, java.util.function.Consumer<String> onTextDelta) {
 		ContextAssembler.ContextAssembly context = contextAssembler.assemble(assistant, run, messages,
 			baseSystemPrompt, runtimeGuidance);
-		ModelDecision decision = modelProvider.decideNextStep(chatModel, context.systemPrompt(), messages, tools, stepIndex);
+		ModelDecision decision = modelProvider.decideNextStep(chatModel, context.systemPrompt(), messages, tools,
+			stepIndex, onTextDelta);
 		return new PlanningOutcome(decision, context);
 	}
 
