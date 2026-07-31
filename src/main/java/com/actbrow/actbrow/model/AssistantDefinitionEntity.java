@@ -49,6 +49,10 @@ public class AssistantDefinitionEntity {
 	@Column(name = "last_sync_summary_json", columnDefinition = "TEXT")
 	private String lastSyncSummaryJson;
 
+	/** JSON object: accent, background, text, launcherPosition (bottom-right|bottom-left), title, etc. */
+	@Column(name = "widget_theme_json", columnDefinition = "TEXT")
+	private String widgetThemeJson;
+
 	@Column(name = "user_id", nullable = false)
 	private String userId;
 
@@ -159,6 +163,14 @@ public class AssistantDefinitionEntity {
 
 	public void setLastSyncSummaryJson(String lastSyncSummaryJson) {
 		this.lastSyncSummaryJson = lastSyncSummaryJson;
+	}
+
+	public String getWidgetThemeJson() {
+		return widgetThemeJson;
+	}
+
+	public void setWidgetThemeJson(String widgetThemeJson) {
+		this.widgetThemeJson = widgetThemeJson;
 	}
 
 	public String getUserId() {

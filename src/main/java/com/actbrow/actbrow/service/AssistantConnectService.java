@@ -15,15 +15,18 @@ public class AssistantConnectService {
 	private final AssistantSyncService assistantSyncService;
 	private final AssistantSetupPromptService setupPromptService;
 	private final EmbedSnippetService embedSnippetService;
+	private final WidgetThemeService widgetThemeService;
 	private final String publicBaseUrl;
 
 	public AssistantConnectService(AssistantService assistantService, AssistantSyncService assistantSyncService,
 		AssistantSetupPromptService setupPromptService, EmbedSnippetService embedSnippetService,
+		WidgetThemeService widgetThemeService,
 		@Value("${actbrow.public.base-url:http://localhost:8080}") String publicBaseUrl) {
 		this.assistantService = assistantService;
 		this.assistantSyncService = assistantSyncService;
 		this.setupPromptService = setupPromptService;
 		this.embedSnippetService = embedSnippetService;
+		this.widgetThemeService = widgetThemeService;
 		this.publicBaseUrl = publicBaseUrl;
 	}
 
@@ -56,7 +59,8 @@ public class AssistantConnectService {
 	private AssistantConnectResponse toConnectResponse(AssistantDefinitionEntity assistant) {
 		String embedSnippet = assistant.getWidgetKey() == null
 			? null
-			: embedSnippetService.buildSnippet(publicBaseUrl, assistant.getId(), assistant.getWidgetKey());
+			: embedSnippetService.buildSnippet(publicBaseUrl, assistant.getId(), assistant.getWidgetKey(),
+				widgetThemeService.themeFor(assistant));
 		return new AssistantConnectResponse(
 			assistant.getId(),
 			assistant.getName(),

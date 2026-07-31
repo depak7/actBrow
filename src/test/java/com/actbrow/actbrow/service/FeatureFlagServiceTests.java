@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 
 class FeatureFlagServiceTests {
 
-	private final FeatureFlagService flags = new FeatureFlagService();
+	private final FeatureFlagService flags = new FeatureFlagService(true, false);
 
 	@Test
 	void defaultsToolsEnabledAndShadowOff() {
@@ -31,5 +31,22 @@ class FeatureFlagServiceTests {
 	@Test
 	void unknownFlagIsFalse() {
 		assertThat(flags.isEnabled("a1", "no_such_flag")).isFalse();
+	}
+
+	@Test
+	void configuredKillSwitchSurvivesRestart() {
+		// A restart re-runs the constructor: an operator who set ACTBROW_TOOLS_ENABLED=false must
+		// not have tools silently re-enabled by the next deploy.
+		FeatureFlagService restarted = new FeatureFlagService(false, true);
+		assertThat(restarted.isEnabled("a1", FeatureFlagService.TOOLS_ENABLED)).isFalse();
+		assertThat(restarted.isEnabled("a1", FeatureFlagService.SHADOW_MODE)).isTrue();
+	}
+
+	@Test
+	void perAssistantOverrideStillAppliesOverConfiguredBaseline() {
+		FeatureFlagService restricted = new FeatureFlagService(false, false);
+		restricted.setAssistantFlag("a1", FeatureFlagService.TOOLS_ENABLED, true);
+		assertThat(restricted.isEnabled("a1", FeatureFlagService.TOOLS_ENABLED)).isTrue();
+		assertThat(restricted.isEnabled("a2", FeatureFlagService.TOOLS_ENABLED)).isFalse();
 	}
 }

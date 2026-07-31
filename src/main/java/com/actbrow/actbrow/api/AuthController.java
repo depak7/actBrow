@@ -1,9 +1,9 @@
 package com.actbrow.actbrow.api;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -39,45 +40,41 @@ public class AuthController {
 
 	@PostMapping("/google")
 	public ResponseEntity<?> googleLogin(@RequestBody Map<String, String> body) {
-		String idToken = body.get("idToken");
-		String googleId = body.get("googleId");
-		String email = body.get("email");
-		String fullName = body.get("fullName");
-		String pictureUrl = body.get("pictureUrl");
+		String idToken = body == null ? null : body.get("idToken");
+		if (idToken == null || idToken.isBlank()) {
+			return ResponseEntity.badRequest().body(Map.of("error", "Valid Google sign-in (idToken) is required"));
+		}
 
-		if (idToken != null && !idToken.isBlank()) {
-			try {
-				Map<String, Object> claims = googleIdTokenVerifier.verifyAndDecode(idToken);
-				if (claims == null) {
-					return ResponseEntity.badRequest().body(Map.of("error", "Invalid Google token"));
-				}
-				Object sub = claims.get("sub");
-				Object em = claims.get("email");
-				googleId = sub != null ? String.valueOf(sub) : null;
-				email = em != null ? String.valueOf(em) : null;
-				if (fullName == null || fullName.isBlank()) {
-					Object name = claims.get("name");
-					if (name != null) {
-						fullName = String.valueOf(name);
-					}
-				}
-				if (pictureUrl == null || pictureUrl.isBlank()) {
-					Object pic = claims.get("picture");
-					if (pic != null) {
-						pictureUrl = String.valueOf(pic);
-					}
-				}
+		String googleId;
+		String email;
+		String fullName;
+		String pictureUrl;
+		try {
+			Map<String, Object> claims = googleIdTokenVerifier.verifyAndDecode(idToken);
+			if (claims == null) {
+				return ResponseEntity.badRequest().body(Map.of("error", "Invalid Google token"));
 			}
-			catch (Exception exception) {
-				// Never surface raw verifier detail (token internals, network errors) to the client.
-				log.warn("Google ID token verification failed", exception);
-				return ResponseEntity.badRequest().body(Map.of("error", "Google sign-in failed"));
+			Object sub = claims.get("sub");
+			Object em = claims.get("email");
+			googleId = sub != null ? String.valueOf(sub) : null;
+			email = em != null ? String.valueOf(em) : null;
+			Object name = claims.get("name");
+			fullName = name != null ? String.valueOf(name) : null;
+			Object pic = claims.get("picture");
+			pictureUrl = pic != null ? String.valueOf(pic) : null;
+			Object emailVerified = claims.get("email_verified");
+			if (emailVerified != null && !Boolean.parseBoolean(String.valueOf(emailVerified))
+				&& !"true".equalsIgnoreCase(String.valueOf(emailVerified))) {
+				return ResponseEntity.badRequest().body(Map.of("error", "Google email is not verified"));
 			}
+		}
+		catch (Exception exception) {
+			log.warn("Google ID token verification failed", exception);
+			return ResponseEntity.badRequest().body(Map.of("error", "Google sign-in failed"));
 		}
 
 		if (googleId == null || googleId.isBlank() || email == null || email.isBlank()) {
-			return ResponseEntity.badRequest().body(
-				Map.of("error", "Valid Google sign-in (idToken) or googleId and email are required"));
+			return ResponseEntity.badRequest().body(Map.of("error", "Valid Google sign-in (idToken) is required"));
 		}
 
 		final String resolvedGoogleId = googleId;
@@ -115,10 +112,22 @@ public class AuthController {
 	}
 
 	@GetMapping("/me")
-	public ResponseEntity<?> getCurrentUser() {
-		// Dashboard auth is currently unauthenticated. Frontend manages session state via the
-		// userId returned from /auth/google. Wire proper session/JWT before multi-customer deploy.
-		return ResponseEntity.ok(Map.of("authenticated", false));
+	public ResponseEntity<?> getCurrentUser(
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		if (!"account".equals(authType) || userId == null || userId.isBlank()) {
+			return ResponseEntity.ok(Map.of("authenticated", false));
+		}
+		return userRepository.findById(userId)
+			.<ResponseEntity<?>>map(user -> {
+				Map<String, Object> userJson = new LinkedHashMap<>();
+				userJson.put("id", user.getId());
+				userJson.put("email", user.getEmail());
+				userJson.put("fullName", user.getFullName());
+				userJson.put("pictureUrl", user.getProfilePictureUrl());
+				return ResponseEntity.ok(Map.of("authenticated", true, "user", userJson));
+			})
+			.orElseGet(() -> ResponseEntity.ok(Map.of("authenticated", false)));
 	}
 
 	private String generateApiKey() {

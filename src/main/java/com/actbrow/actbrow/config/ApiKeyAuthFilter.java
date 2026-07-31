@@ -5,6 +5,7 @@ import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
@@ -35,12 +36,18 @@ public class ApiKeyAuthFilter implements WebFilter {
 	private final UserRepository userRepository;
 	private final AssistantRepository assistantRepository;
 	private final ObjectMapper objectMapper;
+	private final boolean claudeProxyEnabled;
+	private final String claudeProxySecret;
 
 	public ApiKeyAuthFilter(UserRepository userRepository, AssistantRepository assistantRepository,
-		ObjectMapper objectMapper) {
+		ObjectMapper objectMapper,
+		@Value("${actbrow.claude-proxy.enabled:false}") boolean claudeProxyEnabled,
+		@Value("${actbrow.claude-proxy.secret:}") String claudeProxySecret) {
 		this.userRepository = userRepository;
 		this.assistantRepository = assistantRepository;
 		this.objectMapper = objectMapper;
+		this.claudeProxyEnabled = claudeProxyEnabled;
+		this.claudeProxySecret = claudeProxySecret == null ? "" : claudeProxySecret;
 	}
 
 	@Override
@@ -50,12 +57,16 @@ public class ApiKeyAuthFilter implements WebFilter {
 		String path = request.getPath().value();
 
 		if ("OPTIONS".equalsIgnoreCase(method)) {
-			return chain.filter(exchange);
+			return chain.filter(stripIdentityHeaders(exchange));
 		}
 
 		if (isPublicRoute(method, path)) {
 			log.debug("Allow unauthenticated {} {}", method, path);
-			return chain.filter(exchange);
+			return chain.filter(stripIdentityHeaders(exchange));
+		}
+
+		if (segmentsMatch(path, "/claude")) {
+			return authenticateClaudeProxy(exchange, chain);
 		}
 
 		String apiKey = extractApiKey(exchange);
@@ -79,6 +90,21 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 	}
 
+	private Mono<Void> authenticateClaudeProxy(ServerWebExchange exchange, WebFilterChain chain) {
+		if (!claudeProxyEnabled) {
+			return unauthorized(exchange, "Claude proxy is disabled");
+		}
+		String remote = exchange.getRequest().getRemoteAddress() == null ? ""
+			: exchange.getRequest().getRemoteAddress().getAddress().getHostAddress();
+		boolean loopback = "127.0.0.1".equals(remote) || "0:0:0:0:0:0:0:1".equals(remote) || "::1".equals(remote);
+		String provided = exchange.getRequest().getHeaders().getFirst("X-Actbrow-Internal-Secret");
+		boolean secretOk = !claudeProxySecret.isBlank() && claudeProxySecret.equals(provided);
+		if (!loopback && !secretOk) {
+			return unauthorized(exchange, "Claude proxy is internal-only");
+		}
+		return chain.filter(stripIdentityHeaders(exchange));
+	}
+
 	private Mono<Void> authenticateSetupKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
 		String method, String path) {
 		if (!isSetupRoute(method, path)) {
@@ -86,18 +112,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 		AssistantDefinitionEntity assistant = assistantRepository.findBySetupKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid setup key"));
-		ServerWebExchange authenticatedExchange = exchange.mutate()
-			.request(exchange.getRequest().mutate()
-				.headers(h -> {
-					h.remove("X-User-Id");
-					h.remove("X-Actbrow-Auth-Type");
-					h.remove("X-Actbrow-Assistant-Id");
-					h.set("X-Actbrow-Auth-Type", "setup");
-					h.set("X-Actbrow-Assistant-Id", assistant.getId());
-				})
-				.build())
-			.build();
-		return chain.filter(authenticatedExchange);
+		return chain.filter(withAuthHeaders(exchange, "setup", null, assistant.getId()));
 	}
 
 	private Mono<Void> authenticateWidgetKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
@@ -107,53 +122,53 @@ public class ApiKeyAuthFilter implements WebFilter {
 		}
 		AssistantDefinitionEntity assistant = assistantRepository.findByWidgetKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid widget key"));
-		ServerWebExchange authenticatedExchange = exchange.mutate()
-			.request(exchange.getRequest().mutate()
-				.headers(h -> {
-					h.remove("X-User-Id");
-					h.remove("X-Actbrow-Auth-Type");
-					h.remove("X-Actbrow-Assistant-Id");
-					h.set("X-Actbrow-Auth-Type", "widget");
-					h.set("X-Actbrow-Assistant-Id", assistant.getId());
-					h.set("X-User-Id", assistant.getUserId());
-				})
-				.build())
-			.build();
-		return chain.filter(authenticatedExchange);
+		// Widget auth carries assistant id only — never treat widget as account identity.
+		return chain.filter(withAuthHeaders(exchange, "widget", null, assistant.getId()));
 	}
 
 	private Mono<Void> authenticateAccountKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey) {
 		var user = userRepository.findByApiKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid API key"));
-		ServerWebExchange authenticatedExchange = exchange.mutate()
+		return chain.filter(withAuthHeaders(exchange, "account", user.getId(), null));
+	}
+
+	private ServerWebExchange withAuthHeaders(ServerWebExchange exchange, String authType, String userId,
+		String assistantId) {
+		return exchange.mutate()
 			.request(exchange.getRequest().mutate()
 				.headers(h -> {
 					h.remove("X-User-Id");
 					h.remove("X-Actbrow-Auth-Type");
 					h.remove("X-Actbrow-Assistant-Id");
-					h.set("X-Actbrow-Auth-Type", "account");
-					h.set("X-User-Id", user.getId());
+					h.set("X-Actbrow-Auth-Type", authType);
+					if (userId != null) {
+						h.set("X-User-Id", userId);
+					}
+					if (assistantId != null) {
+						h.set("X-Actbrow-Assistant-Id", assistantId);
+					}
 				})
 				.build())
 			.build();
-		return chain.filter(authenticatedExchange);
+	}
+
+	private ServerWebExchange stripIdentityHeaders(ServerWebExchange exchange) {
+		return exchange.mutate()
+			.request(exchange.getRequest().mutate()
+				.headers(h -> {
+					h.remove("X-User-Id");
+					h.remove("X-Actbrow-Auth-Type");
+					h.remove("X-Actbrow-Assistant-Id");
+				})
+				.build())
+			.build();
 	}
 
 	private boolean isPublicRoute(String method, String path) {
 		if ("GET".equalsIgnoreCase(method) && "/health".equals(path)) {
 			return true;
 		}
-		// Internal Claude CLI proxy — called by Spring AI on loopback, no user key needed
-		if (segmentsMatch(path, "/claude")) {
-			return true;
-		}
 		if (segmentsMatch(path, "/v1/waitlist")) {
-			return true;
-		}
-		if (segmentsMatch(path, "/v1/assistants")) {
-			if (path.endsWith("/sync") || path.endsWith("/connect") || path.endsWith("/export")) {
-				return false;
-			}
 			return true;
 		}
 		if ("/actbrow-sdk.js".equals(path) || "/actbrow-widget.js".equals(path)) {
@@ -162,7 +177,8 @@ public class ApiKeyAuthFilter implements WebFilter {
 		if ("GET".equalsIgnoreCase(method) && "/v1/widget/config".equals(path)) {
 			return true;
 		}
-		return segmentsMatch(path, "/auth");
+		// Only Google sign-in is public under /auth. /auth/me requires an account key.
+		return "POST".equalsIgnoreCase(method) && "/auth/google".equals(path);
 	}
 
 	private static boolean isSetupRoute(String method, String path) {

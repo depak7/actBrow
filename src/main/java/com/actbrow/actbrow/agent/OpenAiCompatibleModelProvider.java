@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -40,6 +41,9 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 	private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
 	};
 
+	/** OpenAI function names must match {@code ^[a-zA-Z0-9_-]{1,64}$}. */
+	private static final int MAX_WIRE_NAME_LENGTH = 64;
+
 	private final ChatModel chatModel;
 	private final ObjectMapper objectMapper;
 
@@ -51,6 +55,12 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 	@Override
 	public ModelDecision decideNextStep(String model, String systemPrompt, List<ConversationMessageEntity> messages,
 		List<ToolDescriptor> tools, int stepIndex) {
+		return decideNextStep(model, systemPrompt, messages, tools, stepIndex, null);
+	}
+
+	@Override
+	public ModelDecision decideNextStep(String model, String systemPrompt, List<ConversationMessageEntity> messages,
+		List<ToolDescriptor> tools, int stepIndex, Consumer<String> onTextDelta) {
 
 		List<Message> springMessages = buildMessages(systemPrompt, messages);
 
@@ -62,13 +72,86 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 			optionsBuilder.model(resolvedModel);
 		}
 
+		Map<String, ToolDescriptor> toolsByWireName = buildWireNameMap(tools);
 		if (!tools.isEmpty()) {
-			optionsBuilder.toolCallbacks(buildToolCallbacks(tools));
+			optionsBuilder.toolCallbacks(buildToolCallbacks(toolsByWireName));
 		}
 
 		Prompt prompt = new Prompt(springMessages, optionsBuilder.build());
+		if (onTextDelta != null) {
+			try {
+				return streamDecision(prompt, tools, toolsByWireName, onTextDelta);
+			}
+			catch (StreamingUnavailableException exception) {
+				// Backend rejected the streaming request before producing anything — the blocking
+				// call is equivalent, just without incremental deltas.
+			}
+		}
 		ChatResponse response = chatModel.call(prompt);
-		return parseDecision(response, tools);
+		return parseDecision(response, tools, toolsByWireName);
+	}
+
+	/**
+	 * Streams the completion, pushing TEXT chunks to {@code onTextDelta} as they arrive. Tool calls
+	 * are never surfaced as deltas: Spring AI's OpenAI stream merges tool-call chunks into complete
+	 * calls ({@code OpenAiStreamFunctionCallingHelper}), which are collected here and returned as a
+	 * normal {@link ToolCallDecision}. A failure before any output falls back to the blocking call.
+	 */
+	private ModelDecision streamDecision(Prompt prompt, List<ToolDescriptor> tools,
+		Map<String, ToolDescriptor> toolsByWireName, Consumer<String> onTextDelta) {
+		StringBuilder text = new StringBuilder();
+		Map<String, AssistantMessage.ToolCall> toolCallsById = new LinkedHashMap<>();
+		boolean anyOutput = false;
+		try {
+			for (ChatResponse chunk : chatModel.stream(prompt).toIterable()) {
+				if (chunk == null || chunk.getResult() == null || chunk.getResult().getOutput() == null) {
+					continue;
+				}
+				AssistantMessage output = chunk.getResult().getOutput();
+				if (output.getToolCalls() != null) {
+					for (AssistantMessage.ToolCall toolCall : output.getToolCalls()) {
+						String id = toolCall.id() == null || toolCall.id().isBlank()
+							? "stream-idx-" + toolCallsById.size()
+							: toolCall.id();
+						toolCallsById.put(id, toolCall);
+						anyOutput = true;
+					}
+				}
+				String delta = output.getText();
+				if (delta != null && !delta.isEmpty()) {
+					text.append(delta);
+					anyOutput = true;
+					try {
+						onTextDelta.accept(delta);
+					}
+					catch (Exception ignored) {
+						// Delta delivery is best-effort UI sugar; never let it break the decision.
+					}
+				}
+			}
+		}
+		catch (RuntimeException exception) {
+			if (!anyOutput) {
+				throw new StreamingUnavailableException(exception);
+			}
+			// Mid-stream failure after partial output: surface it — a silently truncated answer
+			// must not be treated as a complete decision.
+			throw exception;
+		}
+		if (!toolCallsById.isEmpty()) {
+			return toToolCallDecision(new ArrayList<>(toolCallsById.values()), tools, toolsByWireName);
+		}
+		if (text.length() == 0 || text.toString().isBlank()) {
+			throw new IllegalArgumentException("Chat model returned neither text nor tool calls");
+		}
+		return new FinalResponseDecision(text.toString());
+	}
+
+	/** The streaming request failed before producing output; the blocking call is a safe retry. */
+	private static final class StreamingUnavailableException extends RuntimeException {
+		StreamingUnavailableException(Throwable cause) {
+			super(cause);
+		}
 	}
 
 	/**
@@ -158,17 +241,47 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 		}
 	}
 
-	private List<ToolCallback> buildToolCallbacks(List<ToolDescriptor> tools) {
+	private List<ToolCallback> buildToolCallbacks(Map<String, ToolDescriptor> toolsByWireName) {
 		List<ToolCallback> callbacks = new ArrayList<>();
-		for (ToolDescriptor tool : tools) {
+		for (Map.Entry<String, ToolDescriptor> entry : toolsByWireName.entrySet()) {
+			ToolDescriptor tool = entry.getValue();
 			ToolDefinition definition = ToolDefinition.builder()
-				.name(sanitizeToolName(tool.key()))
+				.name(entry.getKey())
 				.description(ModelToolPresentation.descriptionForModel(tool, objectMapper))
 				.inputSchema(tool.inputSchema())
 				.build();
 			callbacks.add(new ProxiedToolCallback(definition));
 		}
 		return callbacks;
+	}
+
+	/**
+	 * Maps each tool to a unique OpenAI-safe wire name ({@code ^[a-zA-Z0-9_-]{1,64}$}) for this request.
+	 * The first tool (catalog order) whose sanitized key produces a given name keeps it — matching the
+	 * historical {@link #sanitizeToolName(String)} behavior so stored conversations stay compatible —
+	 * while later collisions get a deterministic {@code _2}, {@code _3}, ... suffix. Names longer than
+	 * 64 characters are truncated before the suffix is applied so uniqueness is preserved.
+	 */
+	static Map<String, ToolDescriptor> buildWireNameMap(List<ToolDescriptor> tools) {
+		Map<String, ToolDescriptor> byWireName = new LinkedHashMap<>();
+		for (ToolDescriptor tool : tools) {
+			String base = sanitizeToolName(tool.key()).replaceAll("[^a-zA-Z0-9_-]", "_");
+			if (base.isEmpty()) {
+				base = "tool";
+			}
+			String candidate = truncate(base, MAX_WIRE_NAME_LENGTH);
+			int suffix = 2;
+			while (byWireName.containsKey(candidate)) {
+				String suffixText = "_" + suffix++;
+				candidate = truncate(base, MAX_WIRE_NAME_LENGTH - suffixText.length()) + suffixText;
+			}
+			byWireName.put(candidate, tool);
+		}
+		return byWireName;
+	}
+
+	private static String truncate(String value, int maxLength) {
+		return value.length() <= maxLength ? value : value.substring(0, maxLength);
 	}
 
 	private static final class ProxiedToolCallback implements ToolCallback {
@@ -194,7 +307,8 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 		return name == null ? "" : name.replace(".", "_").replace("-", "_");
 	}
 
-	private ModelDecision parseDecision(ChatResponse response, List<ToolDescriptor> tools) {
+	private ModelDecision parseDecision(ChatResponse response, List<ToolDescriptor> tools,
+		Map<String, ToolDescriptor> toolsByWireName) {
 		if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
 			throw new IllegalArgumentException("Chat model returned an empty response");
 		}
@@ -202,21 +316,7 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 		List<AssistantMessage.ToolCall> springToolCalls = assistant.getToolCalls();
 
 		if (springToolCalls != null && !springToolCalls.isEmpty()) {
-			List<ToolCall> calls = new ArrayList<>();
-			for (AssistantMessage.ToolCall stc : springToolCalls) {
-				String requestedName = stc.name();
-				ToolDescriptor tool = tools.stream()
-					.filter(t -> sanitizeToolName(t.key()).equals(requestedName) || t.key().equals(requestedName))
-					.findFirst()
-					.orElseThrow(() -> new IllegalArgumentException(
-						"Chat model requested unknown tool: " + requestedName));
-				Map<String, Object> arguments = parseArguments(stc.arguments());
-				String callId = (stc.id() != null && !stc.id().isBlank())
-					? stc.id()
-					: "tc-" + UUID.randomUUID();
-				calls.add(new ToolCall(callId, tool.id(), tool.key(), arguments));
-			}
-			return new ToolCallDecision("Model requested " + calls.size() + " tool(s)", calls);
+			return toToolCallDecision(springToolCalls, tools, toolsByWireName);
 		}
 
 		String text = assistant.getText();
@@ -224,6 +324,29 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 			throw new IllegalArgumentException("Chat model returned neither text nor tool calls");
 		}
 		return new FinalResponseDecision(text);
+	}
+
+	private ToolCallDecision toToolCallDecision(List<AssistantMessage.ToolCall> springToolCalls,
+		List<ToolDescriptor> tools, Map<String, ToolDescriptor> toolsByWireName) {
+		List<ToolCall> calls = new ArrayList<>();
+		for (AssistantMessage.ToolCall stc : springToolCalls) {
+			String requestedName = stc.name();
+			ToolDescriptor tool = toolsByWireName.get(requestedName);
+			if (tool == null) {
+				// Fallback for models echoing the raw catalog key instead of the wire name.
+				tool = tools.stream()
+					.filter(t -> t.key().equals(requestedName))
+					.findFirst()
+					.orElseThrow(() -> new IllegalArgumentException(
+						"Chat model requested unknown tool: " + requestedName));
+			}
+			Map<String, Object> arguments = parseArguments(stc.arguments());
+			String callId = (stc.id() != null && !stc.id().isBlank())
+				? stc.id()
+				: "tc-" + UUID.randomUUID();
+			calls.add(new ToolCall(callId, tool.id(), tool.key(), arguments));
+		}
+		return new ToolCallDecision("Model requested " + calls.size() + " tool(s)", calls);
 	}
 
 	private Map<String, Object> parseArguments(String argumentsJson) {

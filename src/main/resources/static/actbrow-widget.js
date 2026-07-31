@@ -42,7 +42,9 @@
       router: config.router,
       routerMethod: config.routerMethod,
       labels: config.labels,
-      suggestions: config.suggestions
+      suggestions: config.suggestions,
+      theme: config.theme,
+      hideEmptyState: config.hideEmptyState
     });
   }
 
