@@ -1,5 +1,6 @@
 package com.actbrow.actbrow.service;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -24,7 +25,10 @@ public class RunExecutor {
 	private final PendingClientToolStore pendingClientToolStore;
 	private final BuiltinServerToolExecutor builtinServerToolExecutor;
 	private final HttpServerToolExecutor httpServerToolExecutor;
+	private final McpToolExecutor mcpToolExecutor;
 	private final KnowledgeSearchToolExecutor knowledgeSearchToolExecutor;
+	private final ProgressiveToolDisclosureService progressiveToolDisclosureService;
+	private final ToolService toolService;
 	private final ConversationService conversationService;
 	private final RunRepository runRepository;
 	private final ActbrowProperties properties;
@@ -32,14 +36,20 @@ public class RunExecutor {
 	public RunExecutor(PendingClientToolStore pendingClientToolStore,
 		BuiltinServerToolExecutor builtinServerToolExecutor,
 		HttpServerToolExecutor httpServerToolExecutor,
+		McpToolExecutor mcpToolExecutor,
 		KnowledgeSearchToolExecutor knowledgeSearchToolExecutor,
+		ProgressiveToolDisclosureService progressiveToolDisclosureService,
+		ToolService toolService,
 		ConversationService conversationService,
 		RunRepository runRepository,
 		ActbrowProperties properties) {
 		this.pendingClientToolStore = pendingClientToolStore;
 		this.builtinServerToolExecutor = builtinServerToolExecutor;
 		this.httpServerToolExecutor = httpServerToolExecutor;
+		this.mcpToolExecutor = mcpToolExecutor;
 		this.knowledgeSearchToolExecutor = knowledgeSearchToolExecutor;
+		this.progressiveToolDisclosureService = progressiveToolDisclosureService;
+		this.toolService = toolService;
 		this.conversationService = conversationService;
 		this.runRepository = runRepository;
 		this.properties = properties;
@@ -61,31 +71,45 @@ public class RunExecutor {
 			boolean navigated = result.success() && isNavigateTool(tool);
 			return new ExecutionOutcome(result, navigated, false);
 		}
+		catch (java.util.concurrent.CancellationException cancellation) {
+			// Run lost ownership (cancelled or deleted) — unwind to the run loop, never mask this.
+			throw cancellation;
+		}
 		catch (Exception exception) {
 			log.warn("Tool {} failed in run {} with arguments {}", tool.key(), run.getId(), executionArguments, exception);
-			run.setStatus(RunStatus.IN_PROGRESS);
-			runRepository.save(run);
 			return new ExecutionOutcome(failureTracker.executorFailureResult(tool.key(), exception), false, false);
 		}
 	}
 
 	private ToolExecutionResult executeInternal(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
 		Map<String, Object> executionArguments) throws Exception {
+		if (progressiveToolDisclosureService.handles(tool.key())) {
+			return progressiveToolDisclosureService.execute(run,
+				toolService.listDescriptorsForAssistant(run.getAssistantId()), tool.key(), executionArguments);
+		}
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())
 			|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
-			run.setStatus(RunStatus.WAITING_FOR_CLIENT_TOOL);
-			runRepository.save(run);
+			// Guarded CAS instead of a blind entity save: if the run is no longer IN_PROGRESS
+			// (cancelled/deleted from another thread or instance), stop instead of overwriting it.
+			if (runRepository.transition(run.getId(), RunStatus.IN_PROGRESS,
+				RunStatus.WAITING_FOR_CLIENT_TOOL, Instant.now()) == 0) {
+				throw new java.util.concurrent.CancellationException("Run is no longer active");
+			}
 			try {
 				ToolExecutionResult result = pendingClientToolStore.register(run.getId(), toolCall.toolCallId())
 					.get(properties.toolTimeout().toMillis(), TimeUnit.MILLISECONDS);
-				run.setStatus(RunStatus.IN_PROGRESS);
-				runRepository.save(run);
+				if (runRepository.transition(run.getId(), RunStatus.WAITING_FOR_CLIENT_TOOL,
+					RunStatus.IN_PROGRESS, Instant.now()) == 0) {
+					throw new java.util.concurrent.CancellationException("Run is no longer active");
+				}
 				return result;
 			}
 			catch (TimeoutException e) {
 				pendingClientToolStore.cancel(toolCall.toolCallId());
-				run.setStatus(RunStatus.IN_PROGRESS);
-				runRepository.save(run);
+				if (runRepository.transition(run.getId(), RunStatus.WAITING_FOR_CLIENT_TOOL,
+					RunStatus.IN_PROGRESS, Instant.now()) == 0) {
+					throw new java.util.concurrent.CancellationException("Run is no longer active");
+				}
 				String message = "Client tool '" + tool.key() + "' timed out after "
 					+ properties.toolTimeout().toMillis() + "ms. You did NOT receive any data from it. "
 					+ "Do not describe page content. Tell the user this tool could not complete and stop.";
@@ -97,6 +121,9 @@ public class RunExecutor {
 				run.getId(), run.getConversationId(), run.getAssistantId(), executionArguments);
 			return knowledgeSearchToolExecutor.execute(run.getAssistantId(),
 				mergeKnowledgeSearchArguments(run.getConversationId(), executionArguments));
+		}
+		if (ToolCatalogPolicies.executesAsMcpTool(tool.type(), tool.executorRef())) {
+			return mcpToolExecutor.execute(tool, executionArguments);
 		}
 		if (ToolCatalogPolicies.executesAsHttpTool(tool.type(), tool.executorRef())) {
 			return httpServerToolExecutor.execute(tool, executionArguments);

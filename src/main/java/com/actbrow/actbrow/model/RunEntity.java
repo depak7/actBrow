@@ -40,6 +40,13 @@ public class RunEntity {
 	@Column
 	private Instant completedAt;
 
+	/**
+	 * Heartbeat for the worker that owns this run. Set when a worker claims the run and refreshed on
+	 * every loop step; a stale value means the owning process died and the run may be recovered.
+	 */
+	@Column
+	private Instant claimedAt;
+
 	@PrePersist
 	void prePersist() {
 		if (id == null) {
@@ -108,5 +115,13 @@ public class RunEntity {
 
 	public void setCompletedAt(Instant completedAt) {
 		this.completedAt = completedAt;
+	}
+
+	public Instant getClaimedAt() {
+		return claimedAt;
+	}
+
+	public void setClaimedAt(Instant claimedAt) {
+		this.claimedAt = claimedAt;
 	}
 }

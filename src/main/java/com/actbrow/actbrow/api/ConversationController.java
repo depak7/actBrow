@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -22,6 +23,7 @@ import com.actbrow.actbrow.api.dto.TurnRequest;
 import com.actbrow.actbrow.conversation.UserMessageDisplay;
 import com.actbrow.actbrow.model.ConversationMessageRole;
 import com.actbrow.actbrow.service.ConversationService;
+import com.actbrow.actbrow.service.ResourceAuthorizationService;
 import com.actbrow.actbrow.service.RunService;
 
 import jakarta.validation.Valid;
@@ -33,40 +35,48 @@ public class ConversationController {
 
 	private final ConversationService conversationService;
 	private final RunService runService;
+	private final ResourceAuthorizationService authorizationService;
 
-	public ConversationController(ConversationService conversationService, RunService runService) {
+	public ConversationController(ConversationService conversationService, RunService runService,
+		ResourceAuthorizationService authorizationService) {
 		this.conversationService = conversationService;
 		this.runService = runService;
+		this.authorizationService = authorizationService;
 	}
 
 	@PostMapping
 	public ConversationResponse create(@Valid @RequestBody ConversationRequest request,
-		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
-		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId) {
-		if ("widget".equals(authType) && authAssistantId != null && !authAssistantId.equals(request.assistantId())) {
-			throw new IllegalArgumentException("Widget key is not authorized for this assistant");
-		}
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		authorizationService.requireWidgetOrAccountForAssistant(request.assistantId(), authType, userId,
+			authAssistantId);
 		return conversationService.create(request);
 	}
 
 	@GetMapping
 	public List<ConversationSummaryResponse> list(
-		@org.springframework.web.bind.annotation.RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
-		@org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String userId) {
-		if (!"account".equals(authType) || userId == null || userId.isBlank()) {
-			throw new IllegalArgumentException("Account API key is required to list conversations");
-		}
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		authorizationService.requireAccount(authType, userId);
 		return conversationService.listForUser(userId);
 	}
 
 	@PostMapping("/{conversationId}/turns")
-	public RunResponse createTurn(@PathVariable String conversationId, @Valid @RequestBody TurnRequest request) {
+	public RunResponse createTurn(@PathVariable String conversationId, @Valid @RequestBody TurnRequest request,
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		authorizationService.requireAccessibleConversation(conversationId, authType, userId, authAssistantId);
 		return runService.startRun(conversationId, request);
 	}
 
 	@GetMapping("/{conversationId}/messages")
-	public List<ConversationMessageResponse> listMessages(@PathVariable String conversationId) {
-		conversationService.requireConversation(conversationId);
+	public List<ConversationMessageResponse> listMessages(@PathVariable String conversationId,
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		authorizationService.requireAccessibleConversation(conversationId, authType, userId, authAssistantId);
 		return conversationService.listMessages(conversationId).stream()
 			.map(m -> {
 				String content = m.getContent();
@@ -81,7 +91,11 @@ public class ConversationController {
 
 	@DeleteMapping("/{conversationId}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
-	public void deleteConversation(@PathVariable String conversationId) {
+	public void deleteConversation(@PathVariable String conversationId,
+		@RequestHeader(value = "X-Actbrow-Auth-Type", required = false) String authType,
+		@RequestHeader(value = "X-Actbrow-Assistant-Id", required = false) String authAssistantId,
+		@RequestHeader(value = "X-User-Id", required = false) String userId) {
+		authorizationService.requireAccessibleConversation(conversationId, authType, userId, authAssistantId);
 		runService.deleteConversationCascade(conversationId);
 	}
 }

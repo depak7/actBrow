@@ -21,6 +21,7 @@ import com.actbrow.actbrow.repository.AssistantToolBindingRepository;
 import com.actbrow.actbrow.repository.ConversationMessageRepository;
 import com.actbrow.actbrow.repository.ConversationRepository;
 import com.actbrow.actbrow.repository.KnowledgeDocumentRepository;
+import com.actbrow.actbrow.repository.McpServerRepository;
 import com.actbrow.actbrow.repository.NavigationFlowRepository;
 import com.actbrow.actbrow.repository.RunMemoryRepository;
 import com.actbrow.actbrow.repository.RunRepository;
@@ -36,6 +37,7 @@ public class AssistantService {
 	private final NavigationFlowRepository navigationFlowRepository;
 	private final KnowledgeDocumentRepository knowledgeDocumentRepository;
 	private final ApiIntegrationRepository apiIntegrationRepository;
+	private final McpServerRepository mcpServerRepository;
 	private final ConversationRepository conversationRepository;
 	private final ConversationMessageRepository conversationMessageRepository;
 	private final RunRepository runRepository;
@@ -48,6 +50,7 @@ public class AssistantService {
 		NavigationFlowRepository navigationFlowRepository,
 		KnowledgeDocumentRepository knowledgeDocumentRepository,
 		ApiIntegrationRepository apiIntegrationRepository,
+		McpServerRepository mcpServerRepository,
 		ConversationRepository conversationRepository,
 		ConversationMessageRepository conversationMessageRepository,
 		RunRepository runRepository,
@@ -60,6 +63,7 @@ public class AssistantService {
 		this.navigationFlowRepository = navigationFlowRepository;
 		this.knowledgeDocumentRepository = knowledgeDocumentRepository;
 		this.apiIntegrationRepository = apiIntegrationRepository;
+		this.mcpServerRepository = mcpServerRepository;
 		this.conversationRepository = conversationRepository;
 		this.conversationMessageRepository = conversationMessageRepository;
 		this.runRepository = runRepository;
@@ -147,6 +151,7 @@ public class AssistantService {
 		navigationFlowRepository.deleteAllByAssistant_Id(id);
 		knowledgeDocumentRepository.deleteAllByAssistantId(id);
 		apiIntegrationRepository.deleteAllByAssistantId(id);
+		mcpServerRepository.deleteByAssistantId(id);
 		for (ConversationEntity conversation : conversationRepository.findAllByAssistantId(id)) {
 			for (RunEntity run : runRepository.findAllByConversationId(conversation.getId())) {
 				runStepRepository.deleteByRunId(run.getId());

@@ -75,6 +75,10 @@ public final class ToolCatalogPolicies {
 		return type == ToolType.SERVER_HTTP;
 	}
 
+	public static boolean executesAsMcpTool(ToolType type, String executorRef) {
+		return type == ToolType.MCP || "mcp.call".equals(executorRef);
+	}
+
 	private static boolean isClientSideCatalogExecutor(String executorRef) {
 		return "app.navigate".equals(executorRef)
 			|| "path.find".equals(executorRef)
@@ -82,6 +86,8 @@ public final class ToolCatalogPolicies {
 	}
 
 	private static boolean isServerSideCatalogExecutor(String executorRef) {
-		return "knowledge.search".equals(executorRef);
+		return "knowledge.search".equals(executorRef)
+			|| ProgressiveToolDisclosureService.TOOL_SEARCH.equals(executorRef)
+			|| ProgressiveToolDisclosureService.TOOL_ACTIVATE.equals(executorRef);
 	}
 }
