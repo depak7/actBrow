@@ -71,6 +71,9 @@ public class AssistantService {
 		this.runMemoryRepository = runMemoryRepository;
 	}
 
+	// No eviction: this always inserts a new row, and nothing can be cached under an id that did not
+	// exist yet (a failed lookup throws, and exceptions are not cached). The built-in tool attach below
+	// goes through the ToolService proxy, so the tool catalog is evicted by that call.
 	public AssistantResponse createOrUpdate(CreateAssistantRequest request) {
 		AssistantDefinitionEntity entity = new AssistantDefinitionEntity();
 		entity.setKey(generateAssistantKey(request.name()));
@@ -86,6 +89,18 @@ public class AssistantService {
 		return toResponse(saved);
 	}
 
+	/**
+	 * Read ~3x per run plus on the auth paths, so it is cached per assistant id.
+	 *
+	 * <p>A missing id throws {@link NotFoundException} rather than returning null or empty. Spring's
+	 * cache abstraction only stores a method's return value — a thrown exception leaves the cache
+	 * untouched — so a lookup for an unknown id is never cached, and an assistant created after a
+	 * failed lookup is visible immediately. There is no negative-caching hole here.
+	 *
+	 * <p>Note this is self-invoked by {@link #requireOwnedEntity} and {@link #update}, which bypasses
+	 * the cache proxy: those two always read straight from the database. That is harmless (a redundant
+	 * read, never a stale one) and is in fact what {@code update} wants — a managed, fresh entity.
+	 */
 	public AssistantDefinitionEntity requireEntity(String assistantId) {
 		return assistantRepository.findById(assistantId)
 			.orElseThrow(() -> new NotFoundException("Assistant not found"));
@@ -108,6 +123,11 @@ public class AssistantService {
 		}
 	}
 
+	/**
+	 * The catch-all writer: AssistantSyncService, AssistantConnectService, ActivationStatusService and
+	 * WidgetThemeService all mutate an entity and persist it through here, so this is the single point
+	 * that has to evict for all of them.
+	 */
 	public AssistantDefinitionEntity saveEntity(AssistantDefinitionEntity entity) {
 		return assistantRepository.save(entity);
 	}

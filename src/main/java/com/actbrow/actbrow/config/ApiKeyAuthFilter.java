@@ -17,7 +17,7 @@ import org.springframework.web.server.WebFilterChain;
 
 import com.actbrow.actbrow.model.AssistantDefinitionEntity;
 import com.actbrow.actbrow.repository.AssistantRepository;
-import com.actbrow.actbrow.repository.UserRepository;
+import com.actbrow.actbrow.service.ApiKeyIdentityResolver;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -33,18 +33,15 @@ public class ApiKeyAuthFilter implements WebFilter {
 		"/v1/conversations",
 		"/v1/runs");
 
-	private final UserRepository userRepository;
-	private final AssistantRepository assistantRepository;
+	private final ApiKeyIdentityResolver identityResolver;
 	private final ObjectMapper objectMapper;
 	private final boolean claudeProxyEnabled;
 	private final String claudeProxySecret;
 
-	public ApiKeyAuthFilter(UserRepository userRepository, AssistantRepository assistantRepository,
-		ObjectMapper objectMapper,
+	public ApiKeyAuthFilter(ApiKeyIdentityResolver identityResolver, ObjectMapper objectMapper,
 		@Value("${actbrow.claude-proxy.enabled:false}") boolean claudeProxyEnabled,
 		@Value("${actbrow.claude-proxy.secret:}") String claudeProxySecret) {
-		this.userRepository = userRepository;
-		this.assistantRepository = assistantRepository;
+		this.identityResolver = identityResolver;
 		this.objectMapper = objectMapper;
 		this.claudeProxyEnabled = claudeProxyEnabled;
 		this.claudeProxySecret = claudeProxySecret == null ? "" : claudeProxySecret;
@@ -110,9 +107,9 @@ public class ApiKeyAuthFilter implements WebFilter {
 		if (!isSetupRoute(method, path)) {
 			return unauthorized(exchange, "Setup key cannot access this route");
 		}
-		AssistantDefinitionEntity assistant = assistantRepository.findBySetupKey(apiKey)
+		var identity = identityResolver.resolveSetupKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid setup key"));
-		return chain.filter(withAuthHeaders(exchange, "setup", null, assistant.getId()));
+		return chain.filter(withAuthHeaders(exchange, "setup", null, identity.assistantId()));
 	}
 
 	private Mono<Void> authenticateWidgetKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
@@ -120,16 +117,16 @@ public class ApiKeyAuthFilter implements WebFilter {
 		if (!isWidgetRoute(path)) {
 			return unauthorized(exchange, "Widget key cannot access this route");
 		}
-		AssistantDefinitionEntity assistant = assistantRepository.findByWidgetKey(apiKey)
+		var identity = identityResolver.resolveWidgetKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid widget key"));
 		// Widget auth carries assistant id only — never treat widget as account identity.
-		return chain.filter(withAuthHeaders(exchange, "widget", null, assistant.getId()));
+		return chain.filter(withAuthHeaders(exchange, "widget", null, identity.assistantId()));
 	}
 
 	private Mono<Void> authenticateAccountKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey) {
-		var user = userRepository.findByApiKey(apiKey)
+		var identity = identityResolver.resolveAccountKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid API key"));
-		return chain.filter(withAuthHeaders(exchange, "account", user.getId(), null));
+		return chain.filter(withAuthHeaders(exchange, "account", identity.userId(), null));
 	}
 
 	private ServerWebExchange withAuthHeaders(ServerWebExchange exchange, String authType, String userId,

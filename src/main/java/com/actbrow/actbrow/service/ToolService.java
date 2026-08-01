@@ -41,6 +41,10 @@ public class ToolService {
 		this.jsonSchemaValidator = jsonSchemaValidator;
 	}
 
+	// A tool row is shared: it can be bound to any number of assistants, and this method does not know
+	// which. Evicting the whole catalog is the conservative choice — correctness over precision. The
+	// cache is refilled by the next run's single batch load, so the cost of over-evicting is trivial
+	// next to the cost of one assistant running against a stale tool schema.
 	public ToolResponse create(ToolRequest request) {
 		if (request.type() == ToolType.BUILD_IN) {
 			throw new IllegalArgumentException("BUILD_IN tools are platform-managed");
@@ -52,6 +56,7 @@ public class ToolService {
 		return saveNewEntity(new ToolDefinitionEntity(), request, key);
 	}
 
+	/** Key-addressed upsert; the affected assistants are unknown here, so evict the whole catalog. */
 	public ToolResponse upsertByKey(ToolRequest request) {
 		if (request.key() == null || request.key().isBlank()) {
 			throw new IllegalArgumentException("Tool key is required for upsert");
@@ -80,15 +85,19 @@ public class ToolService {
 		}
 	}
 
+	// Self-call to attachBuiltInTools bypasses the cache proxy, so this entry point carries its own
+	// eviction rather than relying on the callee's.
 	public void attachBuiltInClientTools(String assistantId) {
 		attachBuiltInTools(assistantId);
 	}
 
+	// Self-call to delete(..) bypasses the proxy, so the eviction is declared here as well.
 	@Transactional
 	public void deleteByKeyIfPresent(String key) {
 		toolRepository.findByKey(key).ifPresent(entity -> delete(entity.getId()));
 	}
 
+	/** A tool edit can change the schema seen by every assistant it is bound to; evict all. */
 	public ToolResponse update(String id, ToolRequest request) {
 		ToolDefinitionEntity entity = requireEntity(id);
 		String newKey = request.key() == null || request.key().isBlank() ? entity.getKey() : request.key().trim();
@@ -100,6 +109,7 @@ public class ToolService {
 		return saveNewEntity(entity, request, newKey);
 	}
 
+	/** Drops every binding for the tool, so every assistant's catalog may change; evict all. */
 	@Transactional
 	public void delete(String toolId) {
 		requireEntity(toolId);
@@ -214,6 +224,7 @@ public class ToolService {
 		return toolRepository.findByKey(key);
 	}
 
+	// Self-call to attachTool bypasses the proxy; evict here too.
 	public void attachToolIfAbsent(String assistantId, String toolKey) {
 		ToolDefinitionEntity tool = toolRepository.findByKey(toolKey)
 			.orElseThrow(() -> new NotFoundException("Tool not found: " + toolKey));
@@ -223,6 +234,8 @@ public class ToolService {
 		attachTool(assistantId, tool.getId());
 	}
 
+	// Self-calls to create/attachTool bypass the proxy. The new tool is bound only to this assistant,
+	// so a keyed eviction is exact here — no need for the conservative allEntries.
 	public ToolResponse createAndAttach(String assistantId, ToolRequest request) {
 		ToolResponse tool = create(request);
 		attachTool(assistantId, tool.id());
@@ -240,6 +253,11 @@ public class ToolService {
 			.orElseThrow(() -> new NotFoundException("Tool not found"));
 	}
 
+	/**
+	 * The hot catalog read: once per run plus once per progressive-disclosure meta-tool call. Cached
+	 * per assistant; every writer above evicts, and the TTL is only a backstop. No other method in
+	 * this class calls it, so there is no self-invocation path that would bypass the cache proxy.
+	 */
 	public List<ToolDescriptor> listDescriptorsForAssistant(String assistantId) {
 		return loadAssistantTools(assistantId).stream()
 			.filter(ToolDefinitionEntity::isEnabled)
