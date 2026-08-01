@@ -175,7 +175,7 @@ public class RunService {
 		Instant now = Instant.now();
 		List<RunEntity> orphans = new java.util.ArrayList<>();
 		orphans.addAll(runRepository.findByStatusAndCreatedAtBefore(RunStatus.PENDING, now.minusSeconds(15)));
-		orphans.addAll(runRepository.findOrphanedInFlight(
+		orphans.addAll(runRepository.findByStatusInAndClaimedAtBefore(
 			List.of(RunStatus.IN_PROGRESS, RunStatus.WAITING_FOR_CLIENT_TOOL), now.minus(staleClaimWindow())));
 		for (RunEntity orphan : orphans) {
 			try {
@@ -272,15 +272,6 @@ public class RunService {
 			.orElse(true);
 	}
 
-	/**
-	 * In-memory-only cancellation check, for hot paths that run many times per step (token deltas).
-	 * Deliberately skips the database read in {@link #isCancelled}: emitting a few extra cosmetic
-	 * deltas after a cancel is harmless, whereas a query per token is not.
-	 */
-	private boolean isCancelledFast(String runId) {
-		return cancelledRuns.contains(runId);
-	}
-
 	private void processRun(String runId) {
 		RunEntity run = requireRun(runId);
 
@@ -347,8 +338,7 @@ public class RunService {
 				final int deltaStepIndex = stepIndex;
 				java.util.concurrent.atomic.AtomicInteger deltaSequence = new java.util.concurrent.atomic.AtomicInteger();
 				java.util.function.Consumer<String> onTextDelta = delta -> {
-					// Fast path only: this runs once per token, so it must not touch the database.
-					if (isCancelledFast(runId)) {
+					if (isCancelled(runId)) {
 						return;
 					}
 					Map<String, Object> deltaPayload = new LinkedHashMap<>();
