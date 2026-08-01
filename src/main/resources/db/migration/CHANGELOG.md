@@ -11,3 +11,15 @@
   - Creates `run_traces` (Phase 5: eval trace recorder)
 - `V20260701_4__fix_run_steps_type_check.sql`
   - Recreates `run_steps_type_check` to include VERIFIER_DECISION + POLICY_DECISION
+- `V20260731__mcp_servers_and_widget_theme.sql`
+  - Adds `assistants.widget_theme_json`
+  - Creates `mcp_servers` for per-assistant MCP connections
+- `V20260731_1__run_claiming.sql`
+  - Adds `runs.claimed_at` (worker heartbeat for atomic run claiming / orphan recovery)
+  - Adds `idx_runs_status_claimed_at` for the recovery poller
+
+## Flyway notes
+
+Flyway is enabled (`spring.flyway.enabled=true`, `baseline-on-migrate=true`, `baseline-version=0`).
+`SchemaPatchRunner` was removed — additive schema must ship as versioned SQL here.
+Core tables (users/assistants/tools/runs/…) are still assumed from the historical schema; a full greenfield baseline remains a follow-up.

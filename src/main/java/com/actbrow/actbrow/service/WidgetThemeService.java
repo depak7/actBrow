@@ -14,6 +14,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Service
 public class WidgetThemeService {
 
+	/** Brand identifier shown in the widget header. Not customisable by operators. */
+	public static final String BRAND_TITLE = "ActBrow Assistant";
+
 	private final AssistantService assistantService;
 	private final ObjectMapper objectMapper;
 
@@ -30,7 +33,10 @@ public class WidgetThemeService {
 	@Transactional
 	public WidgetThemeResponse update(String assistantId, String userId, Map<String, Object> theme) {
 		AssistantDefinitionEntity assistant = assistantService.requireOwnedEntity(assistantId, userId);
-		Map<String, Object> normalized = theme == null ? Map.of() : new LinkedHashMap<>(theme);
+		Map<String, Object> normalized = theme == null ? new LinkedHashMap<>() : new LinkedHashMap<>(theme);
+		// The title is brand, not configuration: pin it here so a direct API call cannot white-label
+		// the widget even though the dashboard never offers the field.
+		normalized.put("title", BRAND_TITLE);
 		try {
 			assistant.setWidgetThemeJson(objectMapper.writeValueAsString(normalized));
 		}
@@ -54,6 +60,8 @@ public class WidgetThemeService {
 			});
 			Map<String, Object> merged = defaultTheme();
 			merged.putAll(parsed);
+			// Rows written before the title was locked (or by an older client) still render as brand.
+			merged.put("title", BRAND_TITLE);
 			return merged;
 		}
 		catch (Exception ex) {
@@ -69,7 +77,7 @@ public class WidgetThemeService {
 		theme.put("text", "#e5e5e5");
 		theme.put("launcherBackground", "#1a1a1a");
 		theme.put("launcherPosition", "bottom-right");
-		theme.put("title", "ActBrow Assistant");
+		theme.put("title", BRAND_TITLE);
 		theme.put("subtitle", "Ask, navigate, and act inside this app");
 		theme.put("fontFamily", "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif");
 		return theme;
