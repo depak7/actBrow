@@ -166,14 +166,19 @@ public class ToolService {
 		Set<String> ownedAssistantIds = assistantRepository.findAllByUserId(userId).stream()
 			.map(AssistantDefinitionEntity::getId)
 			.collect(Collectors.toSet());
-		Set<String> toolIds = new LinkedHashSet<>();
-		for (String assistantId : ownedAssistantIds) {
-			for (AssistantToolBindingEntity binding : bindingRepository.findAllByAssistantId(assistantId)) {
-				toolIds.add(binding.getToolId());
-			}
+		if (ownedAssistantIds.isEmpty()) {
+			return List.of();
 		}
-		return toolIds.stream()
-			.map(this::requireEntity)
+		// Three queries flat. This previously issued one per assistant for bindings and then one per
+		// tool, so the dashboard's tool list cost grew with both an account's assistants and its tools.
+		Set<String> toolIds = new LinkedHashSet<>();
+		for (AssistantToolBindingEntity binding : bindingRepository.findAllByAssistantIdIn(ownedAssistantIds)) {
+			toolIds.add(binding.getToolId());
+		}
+		if (toolIds.isEmpty()) {
+			return List.of();
+		}
+		return toolRepository.findAllById(toolIds).stream()
 			.filter(entity -> !ToolCatalogPolicies.isPlatformCatalogTool(entity.getType(), entity.getKey(),
 				entity.getExecutorRef()))
 			.map(this::toResponse)
