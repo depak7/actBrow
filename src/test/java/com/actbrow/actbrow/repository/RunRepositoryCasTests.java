@@ -100,6 +100,24 @@ class RunRepositoryCasTests {
 	}
 
 	@Test
+	void inFlightRunWithNoHeartbeatCountsAsOrphaned() {
+		// Rows already IN_PROGRESS when claimed_at was introduced have a null heartbeat. A plain
+		// "claimed_at < :before" predicate drops them via SQL null semantics, which would strand
+		// every run that was in flight during the deploy.
+		RunEntity legacy = newRun(RunStatus.IN_PROGRESS);
+		legacy.setClaimedAt(null);
+		runRepository.saveAndFlush(legacy);
+
+		List<RunEntity> orphans = runRepository.findOrphanedInFlight(
+			List.of(RunStatus.IN_PROGRESS, RunStatus.WAITING_FOR_CLIENT_TOOL), Instant.now().minusSeconds(300));
+
+		assertThat(orphans).extracting(RunEntity::getId).contains(legacy.getId());
+		// And it must be reclaimable, not merely discoverable.
+		assertThat(runRepository.claimForExecution(legacy.getId(), Instant.now(),
+			Instant.now().minusSeconds(300))).isEqualTo(1);
+	}
+
+	@Test
 	void transitionIsCompareAndSet() {
 		RunEntity run = newRun(RunStatus.IN_PROGRESS);
 		Instant now = Instant.now();
@@ -128,7 +146,7 @@ class RunRepositoryCasTests {
 		healthyInFlight.setClaimedAt(now);
 		runRepository.saveAndFlush(healthyInFlight);
 
-		List<RunEntity> stale = runRepository.findByStatusInAndClaimedAtBefore(
+		List<RunEntity> stale = runRepository.findOrphanedInFlight(
 			List.of(RunStatus.IN_PROGRESS, RunStatus.WAITING_FOR_CLIENT_TOOL), now.minusSeconds(300));
 		assertThat(stale).extracting(RunEntity::getId).containsExactly(staleInFlight.getId());
 

@@ -1,5 +1,6 @@
 package com.actbrow.actbrow.service;
 
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -249,13 +250,31 @@ public class ToolService {
 			.toList();
 	}
 
+	/**
+	 * Loads an assistant's tools in two queries rather than {@code 1 + N}. This runs once per run and
+	 * again on every progressive-disclosure meta-tool call, so a per-id fetch loop made the catalog
+	 * cost scale with the number of attached tools.
+	 *
+	 * <p>{@code findAllById} does not preserve the requested order, so results are re-sorted back into
+	 * binding order — the catalog order determines which tools get seeded into the model's context.
+	 * A binding pointing at a deleted tool is skipped rather than throwing: one stale row should not
+	 * take down every run for the assistant.
+	 */
 	private List<ToolDefinitionEntity> loadAssistantTools(String assistantId) {
 		Set<String> toolIds = new LinkedHashSet<>();
 		for (AssistantToolBindingEntity binding : bindingRepository.findAllByAssistantId(assistantId)) {
 			toolIds.add(binding.getToolId());
 		}
+		if (toolIds.isEmpty()) {
+			return List.of();
+		}
+		Map<String, ToolDefinitionEntity> byId = new LinkedHashMap<>();
+		for (ToolDefinitionEntity tool : toolRepository.findAllById(toolIds)) {
+			byId.put(tool.getId(), tool);
+		}
 		return toolIds.stream()
-			.map(this::requireEntity)
+			.map(byId::get)
+			.filter(java.util.Objects::nonNull)
 			.toList();
 	}
 

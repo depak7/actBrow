@@ -83,4 +83,8 @@ public class RunStepEntity {
 	public void setPayload(String payload) {
 		this.payload = payload;
 	}
+
+	public Instant getCreatedAt() {
+		return createdAt;
+	}
 }

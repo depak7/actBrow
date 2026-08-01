@@ -1,6 +1,7 @@
 package com.actbrow.actbrow.service;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -28,7 +29,6 @@ public class RunExecutor {
 	private final McpToolExecutor mcpToolExecutor;
 	private final KnowledgeSearchToolExecutor knowledgeSearchToolExecutor;
 	private final ProgressiveToolDisclosureService progressiveToolDisclosureService;
-	private final ToolService toolService;
 	private final ConversationService conversationService;
 	private final RunRepository runRepository;
 	private final ActbrowProperties properties;
@@ -39,7 +39,6 @@ public class RunExecutor {
 		McpToolExecutor mcpToolExecutor,
 		KnowledgeSearchToolExecutor knowledgeSearchToolExecutor,
 		ProgressiveToolDisclosureService progressiveToolDisclosureService,
-		ToolService toolService,
 		ConversationService conversationService,
 		RunRepository runRepository,
 		ActbrowProperties properties) {
@@ -49,15 +48,18 @@ public class RunExecutor {
 		this.mcpToolExecutor = mcpToolExecutor;
 		this.knowledgeSearchToolExecutor = knowledgeSearchToolExecutor;
 		this.progressiveToolDisclosureService = progressiveToolDisclosureService;
-		this.toolService = toolService;
 		this.conversationService = conversationService;
 		this.runRepository = runRepository;
 		this.properties = properties;
 	}
 
+	/**
+	 * @param catalog the assistant's full tool catalog, already loaded by the run loop. Passed in so
+	 *                progressive-disclosure meta-tools do not re-issue the catalog query on every call.
+	 */
 	public ExecutionOutcome execute(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
 		Map<String, Object> executionArguments, boolean navigationAlreadyPerformed,
-		RunToolFailureTracker failureTracker) throws Exception {
+		RunToolFailureTracker failureTracker, List<ToolDescriptor> catalog) throws Exception {
 		if (navigationAlreadyPerformed && isNavigateTool(tool)) {
 			return new ExecutionOutcome(navigationDeferredResult(tool.key()), false, true);
 		}
@@ -67,7 +69,7 @@ public class RunExecutor {
 			return new ExecutionOutcome(guard.syntheticResult(), false, false);
 		}
 		try {
-			ToolExecutionResult result = executeInternal(run, toolCall, tool, executionArguments);
+			ToolExecutionResult result = executeInternal(run, toolCall, tool, executionArguments, catalog);
 			boolean navigated = result.success() && isNavigateTool(tool);
 			return new ExecutionOutcome(result, navigated, false);
 		}
@@ -82,10 +84,9 @@ public class RunExecutor {
 	}
 
 	private ToolExecutionResult executeInternal(RunEntity run, ToolCall toolCall, ToolDescriptor tool,
-		Map<String, Object> executionArguments) throws Exception {
+		Map<String, Object> executionArguments, List<ToolDescriptor> catalog) throws Exception {
 		if (progressiveToolDisclosureService.handles(tool.key())) {
-			return progressiveToolDisclosureService.execute(run,
-				toolService.listDescriptorsForAssistant(run.getAssistantId()), tool.key(), executionArguments);
+			return progressiveToolDisclosureService.execute(run, catalog, tool.key(), executionArguments);
 		}
 		if (ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())
 			|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {

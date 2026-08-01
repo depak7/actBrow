@@ -41,8 +41,17 @@ public class ProgressiveToolDisclosureService {
 	}
 
 	public List<ToolDescriptor> selectForPlanning(RunEntity run, List<ToolDescriptor> catalog) {
+		return selectForPlanning(run, catalog, runMemoryService.getSnapshot(run.getId()));
+	}
+
+	/**
+	 * @param memory a snapshot the caller already loaded, so the run loop reads {@code run_memories}
+	 *               once per step instead of once here and again in {@link ContextAssembler}.
+	 */
+	public List<ToolDescriptor> selectForPlanning(RunEntity run, List<ToolDescriptor> catalog,
+		RunMemoryService.RunMemorySnapshot memory) {
 		Map<String, ToolDescriptor> byKey = index(catalog);
-		Set<String> active = new LinkedHashSet<>(readActiveKeys(run.getId()));
+		Set<String> active = new LinkedHashSet<>(activeKeysFrom(memory));
 		for (ToolDescriptor tool : catalog) {
 			if (isAlwaysOn(tool)) {
 				active.add(tool.key());
@@ -228,9 +237,12 @@ public class ProgressiveToolDisclosureService {
 		return byKey;
 	}
 
-	@SuppressWarnings("unchecked")
 	private List<String> readActiveKeys(String runId) {
-		var snapshot = runMemoryService.getSnapshot(runId);
+		return activeKeysFrom(runMemoryService.getSnapshot(runId));
+	}
+
+	/** Pure read of the active-key list from an already-loaded snapshot — issues no query. */
+	private List<String> activeKeysFrom(RunMemoryService.RunMemorySnapshot snapshot) {
 		Object value = snapshot.summary() == null ? null : snapshot.summary().get(ACTIVE_KEYS_MEMORY);
 		if (value instanceof List<?> list) {
 			List<String> keys = new ArrayList<>();
@@ -253,12 +265,9 @@ public class ProgressiveToolDisclosureService {
 		}
 	}
 
+	/** Delegates to {@link ToolContract} so search filters and policy never classify a tool differently. */
 	private static String sideEffectLevel(ToolDescriptor tool) {
-		Object level = tool.metadata() == null ? null : tool.metadata().get("sideEffectLevel");
-		if (level == null) {
-			return tool.type() == ToolType.SERVER_HTTP || tool.type() == ToolType.MCP ? "WRITE" : "READ";
-		}
-		return String.valueOf(level).toUpperCase(Locale.ROOT);
+		return ToolContract.inferSideEffectLevel(tool).name();
 	}
 
 	private static String truncate(String value, int max) {

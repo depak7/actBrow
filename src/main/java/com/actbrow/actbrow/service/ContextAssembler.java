@@ -32,7 +32,22 @@ public class ContextAssembler {
 
 	public ContextAssembly assemble(AssistantDefinitionEntity assistant, RunEntity run,
 		List<ConversationMessageEntity> messages, String baseSystemPrompt, String runtimeGuidance) {
-		RunMemoryService.RunMemorySnapshot memory = runMemoryService.getSnapshot(run.getId());
+		return assemble(assistant, run, messages, baseSystemPrompt, runtimeGuidance,
+			runMemoryService.getSnapshot(run.getId()));
+	}
+
+	/**
+	 * @param memory a snapshot the caller already loaded. The run loop fetches it once per step and
+	 *               shares it with tool disclosure, rather than each collaborator re-reading the same
+	 *               {@code run_memories} row microseconds apart.
+	 */
+	public ContextAssembly assemble(AssistantDefinitionEntity assistant, RunEntity run,
+		List<ConversationMessageEntity> messages, String baseSystemPrompt, String runtimeGuidance,
+		RunMemoryService.RunMemorySnapshot preloadedMemory) {
+		// Null means "caller had none to share" (the legacy overload) — fetch rather than fail.
+		RunMemoryService.RunMemorySnapshot memory = preloadedMemory != null
+			? preloadedMemory
+			: runMemoryService.getSnapshot(run.getId());
 		String workingMemoryBlock = buildWorkingMemoryBlock(memory);
 		String currentStateBlock = buildCurrentStateBlock(messages, memory);
 

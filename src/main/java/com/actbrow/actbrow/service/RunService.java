@@ -175,7 +175,7 @@ public class RunService {
 		Instant now = Instant.now();
 		List<RunEntity> orphans = new java.util.ArrayList<>();
 		orphans.addAll(runRepository.findByStatusAndCreatedAtBefore(RunStatus.PENDING, now.minusSeconds(15)));
-		orphans.addAll(runRepository.findByStatusInAndClaimedAtBefore(
+		orphans.addAll(runRepository.findOrphanedInFlight(
 			List.of(RunStatus.IN_PROGRESS, RunStatus.WAITING_FOR_CLIENT_TOOL), now.minus(staleClaimWindow())));
 		for (RunEntity orphan : orphans) {
 			try {
@@ -272,6 +272,16 @@ public class RunService {
 			.orElse(true);
 	}
 
+	/**
+	 * In-memory-only cancellation check, for hot paths that run many times per step (token deltas).
+	 * Deliberately skips the database read in {@link #isCancelled}: emitting a few extra cosmetic
+	 * deltas after a cancel is harmless, whereas one query per streamed token is not — a 400-token
+	 * answer would otherwise issue 400 identical SELECTs on the run's virtual thread.
+	 */
+	private boolean isCancelledFast(String runId) {
+		return cancelledRuns.contains(runId);
+	}
+
 	private void processRun(String runId) {
 		RunEntity run = requireRun(runId);
 
@@ -322,9 +332,11 @@ public class RunService {
 
 				List<com.actbrow.actbrow.model.ConversationMessageEntity> messages = conversationService
 					.listMessages(run.getConversationId());
+				// One run_memories read per step, shared by tool disclosure and the context assembler.
+				RunMemoryService.RunMemorySnapshot memory = runMemoryService.getSnapshot(runId);
 				List<ToolDescriptor> tools = forceFinalAnswer
 					? List.of()
-					: progressiveToolDisclosureService.selectForPlanning(run, catalog);
+					: progressiveToolDisclosureService.selectForPlanning(run, catalog, memory);
 				String runtimeGuidance = failureTracker.buildRuntimeGuidance();
 				if (forceFinalAnswer) {
 					runtimeGuidance += "POLICY DECISION (deterministic, non-negotiable): tool execution for this "
@@ -338,7 +350,8 @@ public class RunService {
 				final int deltaStepIndex = stepIndex;
 				java.util.concurrent.atomic.AtomicInteger deltaSequence = new java.util.concurrent.atomic.AtomicInteger();
 				java.util.function.Consumer<String> onTextDelta = delta -> {
-					if (isCancelled(runId)) {
+					// Fast path only: this runs once per token, so it must not touch the database.
+					if (isCancelledFast(runId)) {
 						return;
 					}
 					Map<String, Object> deltaPayload = new LinkedHashMap<>();
@@ -349,7 +362,7 @@ public class RunService {
 				};
 				RunPlanner.PlanningOutcome planning = runPlanner.plan(chatModel, assistant, run, messages, tools,
 					stepIndex, buildSystemPrompt(assistant, run.getConversationId()),
-					runtimeGuidance, onTextDelta);
+					runtimeGuidance, onTextDelta, memory);
 				ModelDecision decision = planning.decision();
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 				runMemoryService.recordModelDecision(run, decision, stepIndex);
@@ -451,7 +464,7 @@ public class RunService {
 							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
 
 							RunExecutor.ExecutionOutcome execution = runExecutor.execute(run, toolCall, tool,
-								executionArguments, navigatedThisRun, failureTracker);
+								executionArguments, navigatedThisRun, failureTracker, catalog);
 							result = execution.result();
 							if (execution.navigated()) {
 								navigatedThisRun = true;

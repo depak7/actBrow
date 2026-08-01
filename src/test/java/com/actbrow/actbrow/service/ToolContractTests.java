@@ -18,14 +18,48 @@ class ToolContractTests {
 			Map.of(), metadata);
 	}
 
+	private ToolDescriptor toolWithTypeAndMetadata(ToolType type, Map<String, Object> metadata) {
+		return new ToolDescriptor("tool-1", "orders.act", "Act", "{}", type, "orders.act", Map.of(), metadata);
+	}
+
 	@Test
-	void defaultsAreReadOnlyAndSafe() {
+	void unannotatedHttpToolIsTreatedAsAWrite() {
+		// An operator-synced HTTP tool with no sideEffectLevel is far more likely to be a write than
+		// a read. Guessing READ would silently exempt it from shadow mode and post-verification.
 		ToolContract contract = ToolContract.from(toolWithMetadata(Map.of()));
-		assertThat(contract.sideEffectLevel()).isEqualTo(SideEffectLevel.READ);
-		assertThat(contract.isWrite()).isFalse();
-		assertThat(contract.requiresPostVerification()).isFalse();
-		assertThat(contract.idempotent()).isTrue();
+		assertThat(contract.sideEffectLevel()).isEqualTo(SideEffectLevel.WRITE);
+		assertThat(contract.isWrite()).isTrue();
+		assertThat(contract.requiresPostVerification()).isTrue();
+		assertThat(contract.idempotent()).isFalse();
 		assertThat(contract.retryable()).isTrue();
+	}
+
+	@Test
+	void builtInAndClientToolsStayReads() {
+		assertThat(ToolContract.from(toolWithTypeAndMetadata(ToolType.BUILD_IN, Map.of())).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.READ);
+		assertThat(ToolContract.from(toolWithTypeAndMetadata(ToolType.CLIENT, Map.of())).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.READ);
+	}
+
+	@Test
+	void httpMethodInfersLevelWhenNotDeclared() {
+		assertThat(ToolContract.from(toolWithMetadata(Map.of("method", "get"))).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.READ);
+		assertThat(ToolContract.from(toolWithMetadata(Map.of("method", "POST"))).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.WRITE);
+		assertThat(ToolContract.from(toolWithMetadata(Map.of("method", "PATCH"))).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.WRITE);
+		assertThat(ToolContract.from(toolWithMetadata(Map.of("method", "DELETE"))).sideEffectLevel())
+			.isEqualTo(SideEffectLevel.DESTRUCTIVE);
+	}
+
+	@Test
+	void declaredLevelAlwaysBeatsInference() {
+		// An explicit READ on a DELETE endpoint is the operator's call, not ours to override.
+		ToolContract contract = ToolContract.from(toolWithMetadata(Map.of(
+			"method", "DELETE", "sideEffectLevel", "READ")));
+		assertThat(contract.sideEffectLevel()).isEqualTo(SideEffectLevel.READ);
 	}
 
 	@Test

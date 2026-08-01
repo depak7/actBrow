@@ -78,6 +78,12 @@ public class ConversationController {
 		@RequestHeader(value = "X-User-Id", required = false) String userId) {
 		authorizationService.requireAccessibleConversation(conversationId, authType, userId, authAssistantId);
 		return conversationService.listMessages(conversationId).stream()
+			// The conversation table doubles as the model's working transcript, so it also holds rows
+			// that are machine plumbing rather than anything a person said: TOOL results and the
+			// ASSISTANT tool-call envelope. Rendering those verbatim shows raw JSON as chat bubbles.
+			// Run inspection is the right surface for them, not the message list.
+			.filter(m -> m.getRole() != ConversationMessageRole.TOOL)
+			.filter(m -> !isToolCallEnvelope(m.getRole(), m.getContent()))
 			.map(m -> {
 				String content = m.getContent();
 				if (m.getRole() == ConversationMessageRole.USER) {
@@ -87,6 +93,11 @@ public class ConversationController {
 					m.getCreatedAt());
 			})
 			.toList();
+	}
+
+	/** Matches the {@code [tool_calls][...]} envelope RunService stores for provider replay. */
+	private static boolean isToolCallEnvelope(ConversationMessageRole role, String content) {
+		return role == ConversationMessageRole.ASSISTANT && content != null && content.startsWith("[tool_calls]");
 	}
 
 	@DeleteMapping("/{conversationId}")

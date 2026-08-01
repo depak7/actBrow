@@ -9,6 +9,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.api.NotFoundException;
 import com.actbrow.actbrow.api.dto.KnowledgeDocumentRequest;
@@ -70,6 +71,7 @@ public class KnowledgeService {
 		return findRelevant(assistantId, query, null, limit);
 	}
 
+	@Transactional(readOnly = true)
 	public List<KnowledgeDocumentResponse> findRelevant(String assistantId, String query, String path, int limit) {
 		List<KnowledgeDocumentEntity> docs = knowledgeDocumentRepository
 			.findAllByAssistantIdAndEnabledTrueOrderByUpdatedAtDesc(assistantId);

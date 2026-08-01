@@ -27,7 +27,7 @@ public record ToolContract(
 
 	public static ToolContract from(ToolDescriptor tool) {
 		Map<String, Object> metadata = tool == null || tool.metadata() == null ? Map.of() : tool.metadata();
-		SideEffectLevel level = SideEffectLevel.fromMetadata(metadata.get("sideEffectLevel"));
+		SideEffectLevel level = inferSideEffectLevel(tool);
 		return new ToolContract(
 			boolValue(metadata.get("retryable"), true),
 			boolValue(metadata.get("idempotent"), level == SideEffectLevel.READ),
@@ -36,6 +36,37 @@ public record ToolContract(
 			stringOrNull(metadata.get("verificationMode")),
 			stringList(metadata.get("preconditions")),
 			stringList(metadata.get("commonFailureModes")));
+	}
+
+	/**
+	 * Single source of truth for how consequential a tool is, so policy and tool disclosure can never
+	 * disagree about the same tool.
+	 *
+	 * <p>Explicit {@code metadata.sideEffectLevel} always wins. Otherwise the level is inferred, and
+	 * the inference is deliberately pessimistic: an operator-synced HTTP or MCP tool that forgot the
+	 * annotation is treated as a WRITE rather than a READ. Guessing READ would silently exempt real
+	 * writes from shadow mode and post-action verification — the failure that actually hurts.
+	 */
+	public static SideEffectLevel inferSideEffectLevel(ToolDescriptor tool) {
+		Map<String, Object> metadata = tool == null || tool.metadata() == null ? Map.of() : tool.metadata();
+		Object declared = metadata.get("sideEffectLevel");
+		if (declared != null) {
+			return SideEffectLevel.fromMetadata(declared);
+		}
+		Object method = metadata.get("method");
+		if (method != null) {
+			return switch (method.toString().trim().toUpperCase(java.util.Locale.ROOT)) {
+				case "GET", "HEAD", "OPTIONS" -> SideEffectLevel.READ;
+				case "DELETE" -> SideEffectLevel.DESTRUCTIVE;
+				default -> SideEffectLevel.WRITE;
+			};
+		}
+		if (tool != null && (tool.type() == com.actbrow.actbrow.model.ToolType.SERVER_HTTP
+			|| tool.type() == com.actbrow.actbrow.model.ToolType.MCP)) {
+			return SideEffectLevel.WRITE;
+		}
+		// Built-in observation and client tools (path.find, page.screenshot, app.navigate) only read.
+		return SideEffectLevel.READ;
 	}
 
 	public boolean isWrite() {

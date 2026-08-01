@@ -11,6 +11,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.actbrow.actbrow.api.dto.InsightsResponse;
 import com.actbrow.actbrow.api.dto.InsightsResponse.IntentCount;
@@ -52,6 +53,7 @@ public class InsightsService {
 		this.runStepRepository = runStepRepository;
 	}
 
+	@Transactional(readOnly = true)
 	public InsightsResponse insights(String assistantId, String userId) {
 		assistantService.requireOwnedEntity(assistantId, userId);
 

@@ -54,6 +54,24 @@ public class AuditLogService {
 			runId, assistantId, toolKey);
 	}
 
+	/**
+	 * Records an operator flipping a runtime safety control. Logged at WARN because a changed kill
+	 * switch or shadow mode is the single most likely explanation for "the agent stopped doing
+	 * anything" — whoever debugs that next needs to find it without asking around.
+	 */
+	public void safetyFlagChanged(String assistantId, String flag, boolean enabled, String actorUserId) {
+		add(new AuditEntry(Instant.now(), null, assistantId, null, "safety_flag_changed",
+			flag + "=" + enabled + " by=" + actorUserId));
+		audit.warn("safety_flag_changed assistant={} flag={} value={} actor={}", assistantId, flag, enabled,
+			actorUserId);
+	}
+
+	/** Records an operator force-closing a tool circuit ahead of its cooldown. */
+	public void circuitReset(String assistantId, String toolKey, String actorUserId) {
+		add(new AuditEntry(Instant.now(), null, assistantId, toolKey, "circuit_reset", "by=" + actorUserId));
+		audit.warn("circuit_reset assistant={} tool={} actor={}", assistantId, toolKey, actorUserId);
+	}
+
 	public List<AuditEntry> recentEntries() {
 		return new ArrayList<>(recent);
 	}

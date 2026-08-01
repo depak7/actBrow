@@ -25,7 +25,8 @@ public class RunPlanner {
 	public PlanningOutcome plan(String chatModel, AssistantDefinitionEntity assistant, RunEntity run,
 		List<ConversationMessageEntity> messages, List<ToolDescriptor> tools, int stepIndex,
 		String baseSystemPrompt, String runtimeGuidance) {
-		return plan(chatModel, assistant, run, messages, tools, stepIndex, baseSystemPrompt, runtimeGuidance, null);
+		return plan(chatModel, assistant, run, messages, tools, stepIndex, baseSystemPrompt, runtimeGuidance, null,
+			null);
 	}
 
 	/**
@@ -34,9 +35,10 @@ public class RunPlanner {
 	 */
 	public PlanningOutcome plan(String chatModel, AssistantDefinitionEntity assistant, RunEntity run,
 		List<ConversationMessageEntity> messages, List<ToolDescriptor> tools, int stepIndex,
-		String baseSystemPrompt, String runtimeGuidance, java.util.function.Consumer<String> onTextDelta) {
+		String baseSystemPrompt, String runtimeGuidance, java.util.function.Consumer<String> onTextDelta,
+		RunMemoryService.RunMemorySnapshot memory) {
 		ContextAssembler.ContextAssembly context = contextAssembler.assemble(assistant, run, messages,
-			baseSystemPrompt, runtimeGuidance);
+			baseSystemPrompt, runtimeGuidance, memory);
 		ModelDecision decision = modelProvider.decideNextStep(chatModel, context.systemPrompt(), messages, tools,
 			stepIndex, onTextDelta);
 		return new PlanningOutcome(decision, context);

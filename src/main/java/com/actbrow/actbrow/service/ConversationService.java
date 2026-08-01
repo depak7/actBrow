@@ -51,6 +51,7 @@ public class ConversationService {
 		return conversationRepository.existsById(conversationId);
 	}
 
+	@Transactional(readOnly = true)
 	public List<ConversationSummaryResponse> listForUser(String userId) {
 		List<AssistantDefinitionEntity> assistants = assistantService.listEntitiesByUser(userId);
 		if (assistants.isEmpty()) {
@@ -86,6 +87,7 @@ public class ConversationService {
 		return messageRepository.save(entity);
 	}
 
+	@Transactional(readOnly = true)
 	public List<ConversationMessageEntity> listMessages(String conversationId) {
 		return messageRepository.findAllByConversationIdOrderByCreatedAtAscSeqAsc(conversationId);
 	}

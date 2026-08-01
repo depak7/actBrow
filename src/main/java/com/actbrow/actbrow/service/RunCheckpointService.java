@@ -43,10 +43,16 @@ public class RunCheckpointService {
 		repository.save(checkpoint);
 	}
 
-	/** Lightweight phase-only checkpoint update. */
+	/**
+	 * Lightweight phase-only checkpoint update. Tries a single UPDATE first and only falls back to the
+	 * read-modify-write insert path when no row exists yet — this runs three times per step/tool cycle,
+	 * so the extra SELECT it used to always issue was pure overhead after the first call of a run.
+	 */
 	@Transactional
 	public void recordPhase(String runId, String conversationId, RunPhase phase, int stepIndex) {
-		record(runId, conversationId, phase, stepIndex, null, null, null);
+		if (repository.updatePhase(runId, conversationId, phase, stepIndex) == 0) {
+			record(runId, conversationId, phase, stepIndex, null, null, null);
+		}
 	}
 
 	public Optional<RunCheckpointEntity> find(String runId) {

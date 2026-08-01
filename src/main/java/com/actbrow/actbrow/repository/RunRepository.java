@@ -72,6 +72,15 @@ public interface RunRepository extends JpaRepository<RunEntity, String> {
 	/** Runs created but never picked up (their creator died before claiming). */
 	List<RunEntity> findByStatusAndCreatedAtBefore(RunStatus status, Instant createdBefore);
 
-	/** Runs whose owning worker stopped heartbeating (process crash / restart mid-run). */
-	List<RunEntity> findByStatusInAndClaimedAtBefore(List<RunStatus> statuses, Instant claimedBefore);
+	/**
+	 * Runs whose owning worker stopped heartbeating (process crash / restart mid-run).
+	 *
+	 * <p>A null {@code claimedAt} counts as orphaned: rows already in flight when the claimed_at
+	 * column was introduced have no heartbeat, and a plain {@code claimed_at < :before} comparison
+	 * would silently exclude them (SQL null semantics), stranding them forever.
+	 */
+	@Query("select r from RunEntity r where r.status in :statuses "
+		+ "and (r.claimedAt is null or r.claimedAt < :claimedBefore)")
+	List<RunEntity> findOrphanedInFlight(@Param("statuses") List<RunStatus> statuses,
+		@Param("claimedBefore") Instant claimedBefore);
 }

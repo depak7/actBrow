@@ -44,4 +44,68 @@ class ToolCircuitBreakerTests {
 		assertThat(breaker.isOpen("bad.tool")).isTrue();
 		assertThat(breaker.allow("good.tool")).isTrue();
 	}
+
+	@Test
+	void snapshotFiltersByAssistantPrefixAndStripsIt() {
+		for (int i = 0; i < 5; i++) {
+			breaker.recordFailure("a1|orders.fetch");
+		}
+		breaker.allow("a1|orders.refund");
+		breaker.allow("a2|orders.fetch");
+
+		assertThat(breaker.snapshotFor("a1"))
+			.containsOnlyKeys("orders.fetch", "orders.refund")
+			.containsEntry("orders.fetch", true)
+			.containsEntry("orders.refund", false);
+	}
+
+	@Test
+	void snapshotIsEmptyForUnknownAssistant() {
+		breaker.allow("a1|orders.fetch");
+		assertThat(breaker.snapshotFor("a2")).isEmpty();
+		assertThat(breaker.snapshotFor(null)).isEmpty();
+	}
+
+	@Test
+	void snapshotDoesNotConsumeTheHalfOpenProbe() {
+		for (int i = 0; i < 5; i++) {
+			breaker.recordFailure("a1|flaky.tool");
+		}
+		breaker.snapshotFor("a1");
+		// Reading the dashboard must not move the circuit to half-open and hand out a free call.
+		assertThat(breaker.allow("a1|flaky.tool")).isFalse();
+	}
+
+	@Test
+	void resetClosesAnOpenCircuit() {
+		for (int i = 0; i < 5; i++) {
+			breaker.recordFailure("a1|flaky.tool");
+		}
+		assertThat(breaker.isOpen("a1|flaky.tool")).isTrue();
+
+		breaker.reset("a1|flaky.tool");
+
+		assertThat(breaker.isOpen("a1|flaky.tool")).isFalse();
+		assertThat(breaker.allow("a1|flaky.tool")).isTrue();
+		assertThat(breaker.snapshotFor("a1")).containsEntry("flaky.tool", false);
+	}
+
+	@Test
+	void resetAlsoClearsTheFailureStreak() {
+		for (int i = 0; i < 5; i++) {
+			breaker.recordFailure("a1|flaky.tool");
+		}
+		breaker.reset("a1|flaky.tool");
+		// A single post-reset failure must not immediately re-open the circuit.
+		breaker.recordFailure("a1|flaky.tool");
+		assertThat(breaker.isOpen("a1|flaky.tool")).isFalse();
+	}
+
+	@Test
+	void resetOfUnknownKeyIsANoOp() {
+		breaker.reset("a1|never.seen");
+
+		assertThat(breaker.snapshotFor("a1")).isEmpty();
+		assertThat(breaker.allow("a1|never.seen")).isTrue();
+	}
 }
