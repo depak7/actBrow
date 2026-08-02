@@ -34,7 +34,23 @@ public class AppConfig {
 	CorsWebFilter corsWebFilter(CorsProperties corsProperties) {
 		CorsConfiguration configuration = new CorsConfiguration();
 		configuration.setAllowCredentials(true);
-		configuration.setAllowedOrigins(corsProperties.allowedOrigins());
+		// An embeddable widget is installed on customer domains we cannot enumerate centrally, so the
+		// browser-level filter is permissive by default. The actual tenant boundary is enforced in
+		// ApiKeyAuthFilter, which rejects a widget key used from an origin the assistant has not
+		// listed — CORS is a browser convention, not an access control.
+		//
+		// setAllowedOriginPatterns rather than setAllowedOrigins: the spec forbids a literal "*" on a
+		// credentialed response, and Spring turns that combination into a 500 on every preflight
+		// rather than a browser-side error. Patterns echo the caller's own origin back instead.
+		List<String> configured = corsProperties.allowedOrigins() == null
+			? List.of()
+			: corsProperties.allowedOrigins();
+		if (configured.isEmpty() || configured.contains("*")) {
+			configuration.setAllowedOriginPatterns(List.of("*"));
+		}
+		else {
+			configuration.setAllowedOrigins(configured);
+		}
 		configuration.setAllowedHeaders(Arrays.asList(
 			"Origin",
 			"Content-Type",

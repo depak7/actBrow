@@ -25,6 +25,16 @@ public class WidgetThemeService {
 		this.objectMapper = objectMapper;
 	}
 
+	/**
+	 * Theme read for the embedded widget. No ownership check: the auth filter has already validated
+	 * the widget key and bound it to this assistant, and a widget key has no owning user to compare
+	 * against. Theme is public branding — it is visible in the rendered widget either way.
+	 */
+	public WidgetThemeResponse getForWidget(String assistantId) {
+		AssistantDefinitionEntity assistant = assistantService.requireEntity(assistantId);
+		return new WidgetThemeResponse(assistantId, parseTheme(assistant.getWidgetThemeJson()));
+	}
+
 	public WidgetThemeResponse get(String assistantId, String userId) {
 		AssistantDefinitionEntity assistant = assistantService.requireOwnedEntity(assistantId, userId);
 		return new WidgetThemeResponse(assistantId, parseTheme(assistant.getWidgetThemeJson()));

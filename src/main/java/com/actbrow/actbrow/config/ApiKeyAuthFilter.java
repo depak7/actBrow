@@ -1,6 +1,7 @@
 package com.actbrow.actbrow.config;
 
 import java.util.Map;
+import java.util.List;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -78,7 +79,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 				return authenticateSetupKey(exchange, chain, apiKey, method, path);
 			}
 			if (apiKey.startsWith("wk_")) {
-				return authenticateWidgetKey(exchange, chain, apiKey, path);
+				return authenticateWidgetKey(exchange, chain, apiKey, method, path);
 			}
 			return authenticateAccountKey(exchange, chain, apiKey);
 		}
@@ -113,12 +114,15 @@ public class ApiKeyAuthFilter implements WebFilter {
 	}
 
 	private Mono<Void> authenticateWidgetKey(ServerWebExchange exchange, WebFilterChain chain, String apiKey,
-		String path) {
-		if (!isWidgetRoute(path)) {
+		String method, String path) {
+		if (!isWidgetRoute(method, path)) {
 			return unauthorized(exchange, "Widget key cannot access this route");
 		}
 		var identity = identityResolver.resolveWidgetKey(apiKey)
 			.orElseThrow(() -> new IllegalArgumentException("Invalid widget key"));
+		if (!originAllowed(exchange, identity.allowedOrigins())) {
+			return unauthorized(exchange, "Widget key is not allowed from this origin");
+		}
 		// Widget auth carries assistant id only — never treat widget as account identity.
 		return chain.filter(withAuthHeaders(exchange, "widget", null, identity.assistantId()));
 	}
@@ -182,7 +186,49 @@ public class ApiKeyAuthFilter implements WebFilter {
 		return "PUT".equalsIgnoreCase(method) && path.matches("/v1/assistants/[^/]+/sync");
 	}
 
-	private static boolean isWidgetRoute(String path) {
+	/**
+	 * A widget key is public — it ships in the page source of every site that embeds the widget — so
+	 * the origin it is used from is the only thing that ties it to a customer. The CORS filter is
+	 * deliberately permissive because embedding domains are not known centrally; this is where the
+	 * boundary is actually enforced.
+	 *
+	 * <p>An empty allow-list means unrestricted, so assistants that predate this check and any the
+	 * operator has not locked down keep working. A request with no Origin header (server-to-server,
+	 * curl) is also allowed through: browsers always send one, and the header is what this defends.
+	 */
+	private static boolean originAllowed(ServerWebExchange exchange, List<String> allowedOrigins) {
+		if (allowedOrigins == null || allowedOrigins.isEmpty()) {
+			return true;
+		}
+		String origin = exchange.getRequest().getHeaders().getOrigin();
+		if (origin == null || origin.isBlank()) {
+			return true;
+		}
+		String normalized = normalizeOrigin(origin);
+		return allowedOrigins.stream()
+			.filter(allowed -> allowed != null && !allowed.isBlank())
+			.anyMatch(allowed -> "*".equals(allowed.trim())
+				|| normalizeOrigin(allowed).equalsIgnoreCase(normalized));
+	}
+
+	/** Trailing slashes and case differ between how operators type an origin and what browsers send. */
+	private static String normalizeOrigin(String origin) {
+		String trimmed = origin.trim();
+		while (trimmed.endsWith("/")) {
+			trimmed = trimmed.substring(0, trimmed.length() - 1);
+		}
+		return trimmed.toLowerCase(java.util.Locale.ROOT);
+	}
+
+	private static boolean isWidgetRoute(String method, String path) {
+		// The widget reads its own theme at boot so branding changes take effect without the customer
+		// re-pasting the embed snippet. GET only: the theme is public branding, but a public key must
+		// never be able to rewrite it.
+		if ("GET".equalsIgnoreCase(method) && path.matches("/v1/assistants/[^/]+/widget-theme")) {
+			return true;
+		}
+		// The widget reads its own theme at boot so branding changes take effect without the customer
+		// re-pasting the embed snippet. Read-only, and the theme is public branding by definition.
 		return WIDGET_PREFIXES.stream().anyMatch(prefix -> segmentsMatch(path, prefix));
 	}
 

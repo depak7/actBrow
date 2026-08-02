@@ -17,6 +17,12 @@
 - `V20260731_1__run_claiming.sql`
   - Adds `runs.claimed_at` (worker heartbeat for atomic run claiming / orphan recovery)
   - Adds `idx_runs_status_claimed_at` for the recovery poller
+- `V20260801__hot_path_indexes.sql`
+  - Adds 11 indexes for the agent hot path and dashboard reads. The historical (pre-Flyway) tables
+    only ever got primary-key and unique-column indexes from Hibernate, so every non-unique foreign
+    key was unindexed — including `conversation_messages(conversation_id, created_at, seq)`, which is
+    read on every planning step. Measured on a 40k-row local table: 2864 → 210 shared buffer reads.
+  - All statements are `IF NOT EXISTS`, so this is a no-op where an environment already has them.
 
 ## Flyway notes
 
