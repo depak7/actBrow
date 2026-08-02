@@ -31,8 +31,13 @@ public class AssistantSetupPromptService {
 
 			## Your job
 			1. Scan this repo: frontend routes, API handlers or OpenAPI spec, README/support docs, and the main layout file.
+			   Enumerate EVERY user-facing route and EVERY API endpoint you find before deciding what to import — you will
+			   report the full list in step 10, including what you left out.
 			2. Infer a focused assistant system prompt for this product.
-			3. Build navigation tools for important app routes (path + display name).
+			3. Build navigation tools for the app routes a user would ask to be taken to (path + display name).
+			   Prefer importing more rather than fewer: the runtime only exposes ~25 tool schemas to the model at a time and
+			   lets it search the rest on demand, so a large catalog costs little. Skip only genuinely unreachable routes
+			   (dev pages, redirects, auth callbacks, error pages).
 			4. Build HTTP tools from OpenAPI or backend routes. Every HTTP tool's metadata MUST include:
 			   - method, baseUrl, path
 			   - execution: "browser" for same-origin calls that should reuse the signed-in user's session cookies, otherwise "server"
@@ -71,7 +76,14 @@ public class AssistantSetupPromptService {
 
 			8. After sync succeeds, add the returned embedSnippet to the app layout and wire navigate to the SPA router (Next.js router.push, React Router navigate, etc.).
 			9. Verify before you finish: run the app, open the widget, and try one navigation request and one HTTP-tool request. If a tool fails, fix the metadata and re-run the sync — a tool that never worked is worse than one you did not add.
-			10. Do NOT hand-configure tools in the Actbrow dashboard — push via sync API. The dashboard is for review only. (MCP servers are the exception: they are connected in the dashboard, not through this sync payload.)
+			10. Report a coverage table as your final message, so the operator can see the gaps rather than discover them
+			    when a user hits one. For routes and for API endpoints separately, list:
+			      - imported: key -> path/endpoint
+			      - skipped: path/endpoint -> one-line reason (unreachable, admin-only, no user intent, unclear semantics)
+			    End with a count: "imported X of Y routes, A of B endpoints". If you skipped something because you were
+			    unsure rather than because it was genuinely unsuitable, say so explicitly — that is the operator's cue to
+			    add it manually.
+			11. Do NOT hand-configure tools in the Actbrow dashboard — push via sync API. The dashboard is for review only. (MCP servers are the exception: they are connected in the dashboard, not through this sync payload.)
 
 			## Rules
 			- Use stable tool keys (dot.case).
@@ -80,7 +92,7 @@ public class AssistantSetupPromptService {
 			- Only include HTTP tools the app actually exposes.
 			- Do not create tools for path.find, page.screenshot, app.navigate or knowledge.search — they are built in and always available.
 			- Keep knowledge concise and operational.
-			- When done, summarize what you pushed, where you added the embed snippet, and what you verified in step 9.
+			- When done, state where you added the embed snippet, what you verified in step 9, and the coverage table from step 10.
 			""".formatted(
 			normalizedBase,
 			assistant.getId(),

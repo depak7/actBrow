@@ -136,27 +136,37 @@ public class ProgressiveToolDisclosureService {
 		if (arguments != null && arguments.get("limit") instanceof Number number) {
 			limit = Math.max(1, Math.min(20, number.intValue()));
 		}
-		List<Map<String, Object>> cards = new ArrayList<>();
+		List<String> queryTerms = tokenize(query);
+		List<ScoredTool> scored = new ArrayList<>();
 		for (ToolDescriptor tool : catalog) {
 			if (isMetaTool(tool.key())) {
-				continue;
-			}
-			String haystack = (tool.key() + " " + nullToEmpty(tool.description())).toLowerCase(Locale.ROOT);
-			if (!query.isBlank() && !haystack.contains(query)) {
-				continue;
-			}
-			if (!domain.isBlank() && !haystack.contains(domain)) {
 				continue;
 			}
 			String level = sideEffectLevel(tool);
 			if (!sideEffect.isBlank() && !sideEffect.equals(level)) {
 				continue;
 			}
+			String haystack = (tool.key() + " " + nullToEmpty(tool.description())).toLowerCase(Locale.ROOT);
+			// Domain stays a hard filter — it is an explicit narrowing, not a relevance hint.
+			if (!domain.isBlank() && !haystack.contains(domain)) {
+				continue;
+			}
+			double score = score(tool, queryTerms);
+			if (score <= 0 && !queryTerms.isEmpty()) {
+				continue;
+			}
+			scored.add(new ScoredTool(tool, level, score));
+		}
+		// Best match first. Ties fall back to catalog order, which is stable across calls.
+		scored.sort((left, right) -> Double.compare(right.score(), left.score()));
+
+		List<Map<String, Object>> cards = new ArrayList<>();
+		for (ScoredTool entry : scored) {
 			Map<String, Object> card = new LinkedHashMap<>();
-			card.put("key", tool.key());
-			card.put("description", truncate(tool.description(), 180));
-			card.put("type", tool.type() == null ? null : tool.type().name());
-			card.put("sideEffectLevel", level);
+			card.put("key", entry.tool().key());
+			card.put("description", truncate(entry.tool().description(), 180));
+			card.put("type", entry.tool().type() == null ? null : entry.tool().type().name());
+			card.put("sideEffectLevel", entry.level());
 			cards.add(card);
 			if (cards.size() >= limit) {
 				break;
@@ -268,6 +278,65 @@ public class ProgressiveToolDisclosureService {
 	/** Delegates to {@link ToolContract} so search filters and policy never classify a tool differently. */
 	private static String sideEffectLevel(ToolDescriptor tool) {
 		return ToolContract.inferSideEffectLevel(tool).name();
+	}
+
+	private record ScoredTool(ToolDescriptor tool, String level, double score) {
+	}
+
+	/**
+	 * Splits a phrase into lowercase terms, treating dots, underscores and hyphens as separators so a
+	 * tool key like {@code orders.refund.create} matches a natural-language query like "refund order".
+	 * Single-character fragments are dropped as noise.
+	 */
+	private static List<String> tokenize(String value) {
+		if (value == null || value.isBlank()) {
+			return List.of();
+		}
+		List<String> terms = new ArrayList<>();
+		for (String raw : value.toLowerCase(Locale.ROOT).split("[^a-z0-9]+")) {
+			if (raw.length() > 1) {
+				terms.add(raw);
+			}
+		}
+		return terms;
+	}
+
+	/**
+	 * Relevance of a tool to the query, by term overlap.
+	 *
+	 * <p>This replaced a whole-string {@code haystack.contains(query)} test, which required the entire
+	 * query phrase to appear verbatim — so a model asking for "refund a customer order" matched
+	 * nothing, and with a large catalog the agent would conclude a capability it actually has does not
+	 * exist. Key matches are weighted above description matches because the key is the operator's
+	 * deliberate naming, while descriptions are prose and match more loosely.
+	 */
+	private static double score(ToolDescriptor tool, List<String> queryTerms) {
+		if (queryTerms.isEmpty()) {
+			return 1;
+		}
+		List<String> keyTerms = tokenize(tool.key());
+		List<String> descriptionTerms = tokenize(nullToEmpty(tool.description()));
+		double raw = 0;
+		for (String term : queryTerms) {
+			if (keyTerms.contains(term)) {
+				raw += 3;
+			}
+			else if (descriptionTerms.contains(term)) {
+				raw += 1;
+			}
+			else if (keyTerms.stream().anyMatch(k -> k.startsWith(term) || term.startsWith(k))) {
+				// Catches plural/stem mismatches such as "orders" vs "order".
+				raw += 1.5;
+			}
+		}
+		if (raw == 0) {
+			// No overlap at all. Must return exactly zero so the caller drops the tool — adding the
+			// tie-breaker below unconditionally would make every tool in the catalog "relevant".
+			return 0;
+		}
+		// Normalise by query length so a long query cannot out-score a short precise one purely on
+		// term count, then nudge shorter keys up as they are usually the more general tool.
+		return raw / queryTerms.size() + 0.01 / keyTerms.size();
 	}
 
 	private static String truncate(String value, int max) {
