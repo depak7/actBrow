@@ -463,9 +463,21 @@ public class RunService {
 							eventBroker.emit(runId, "tool.call.requested", requestedPayload);
 							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
 
+							long toolStartedNanos = System.nanoTime();
 							RunExecutor.ExecutionOutcome execution = runExecutor.execute(run, toolCall, tool,
 								executionArguments, navigatedThisRun, failureTracker, catalog);
+							long toolElapsedMs = (System.nanoTime() - toolStartedNanos) / 1_000_000L;
 							result = execution.result();
+							boolean clientParked = ToolCatalogPolicies.executesAsClientPendingTool(tool.type(),
+								tool.executorRef())
+								|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool);
+							if ("page.observe".equals(tool.key()) || "page.screenshot".equals(tool.key())) {
+								evalTraceRecorder.recordObservationTool(runId, tool.key(),
+									clientParked ? toolElapsedMs : 0L);
+							}
+							else if (clientParked) {
+								evalTraceRecorder.recordClientToolWait(runId, toolElapsedMs);
+							}
 							if (execution.navigated()) {
 								navigatedThisRun = true;
 							}
@@ -801,7 +813,9 @@ public class RunService {
 				json = json.substring(0, 48_000) + "\n...(PAGE_CONTEXT truncated)";
 			}
 			return content.stripTrailing() + UserMessageDisplay.PAGE_CONTEXT_APPENDIX_START
-				+ "Observation only — describes where the user currently is. Do not act on it directly; use the attached tools.) ---\n"
+				+ "Structured observation when the user sent this message — interactive elements, headings, path. "
+				+ "Prefer answering from this; call page.observe only if it is missing or insufficient. "
+				+ "Do not invent page content beyond this snapshot.) ---\n"
 				+ json;
 		}
 		catch (JsonProcessingException exception) {
@@ -820,19 +834,20 @@ public class RunService {
 			.append("\n")
 			.append("Built-in tools (always available):\n")
 			.append("  - path.find        Returns the user's current path, full URL, page title, query, and hash. Call this when you need to know where the user is.\n")
-			.append("  - page.screenshot  Returns a text snapshot of the current page (title + truncated DOM). Call this only to answer questions about what the user is currently looking at.\n")
-			.append("  - app.navigate     Moves the user to a path inside the host app (path or url argument). Use this to take the user somewhere; never use it as a way to read.\n")
-			.append("  - knowledge.search Search operator-configured knowledge (policies, product facts, SOPs). Use ONLY when the user needs company or product information that PAGE_CONTEXT, page.screenshot, and other tools cannot provide. Call at most once per turn. If it returns no results, say you do not have that information — do not invent it.\n")
+			.append("  - page.observe     Returns a compact structured snapshot (interactive elements with ref/role/name, headings, capped visibleText). Prefer this for questions about what is on screen.\n")
+			.append("  - page.screenshot  Fallback capture. Text mode aliases page.observe; image mode returns a viewport PNG. Use ONLY when page.observe / PAGE_CONTEXT cannot answer (canvas, unlabeled icons, visual layout).\n")
+			.append("  - app.navigate     Moves the user to a path inside the host app (path or url argument). Use this to take the user somewhere; never use it as a way to read. Successful results include pageObserve — treat that as already observed.\n")
+			.append("  - knowledge.search Search operator-configured knowledge (policies, product facts, SOPs). Use ONLY when the user needs company or product information that PAGE_CONTEXT, page.observe, and other tools cannot provide. Call at most once per turn. If it returns no results, say you do not have that information — do not invent it.\n")
 			.append("\n")
 			.append("Operation tools (writes, side-effects beyond navigation) appear ONLY in the function schema for this turn and ONLY if the operator attached them. Do not try to synthesize an operation by chaining observation/navigation calls.\n")
 			.append("\n")
 			.append("HARD RULES — violating these is the worst failure mode:\n")
 			.append("  1. Never call a tool that is not in the function schema for this turn. Never invent tool names, paths, URLs, or arguments that aren't supported by an attached tool's schema and defaults.\n")
-			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
-			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in the most recent page.screenshot.visibleText OR in PAGE_CONTEXT. Knowledge search results are operator-provided facts, not observed page content — use them only for policies and product rules, never to describe what is on screen.\n")
+			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result OR from PAGE_CONTEXT on the user message. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
+			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in PAGE_CONTEXT, the most recent page.observe / navigate pageObserve, or page.screenshot.visibleText/elements. Knowledge search results are operator-provided facts, not observed page content — use them only for policies and product rules, never to describe what is on screen.\n")
 			.append("  3. If a tool fails or times out, tell the user honestly: which tool, what failed, and that you can't see the page. Do not improvise a description. Do not retry the same tool with the same arguments.\n")
 			.append("     3a. Tool failures do NOT automatically end the run. If the failure suggests a repair, continue with a corrected next action, a different tool, or one focused clarification.\n")
-			.append("  4. Call each observation tool (path.find, page.screenshot) AT MOST ONCE per user turn. Call knowledge.search AT MOST ONCE per user turn, and only when needed for operator-configured facts. After observation and any needed knowledge lookup, produce a final answer.\n")
+			.append("  4. PAGE_CONTEXT on the user message (and pageObserve attached to a successful app.navigate) already counts as observation for this turn. Prefer answering from that. Call page.observe or page.screenshot AT MOST ONCE per user turn, and only if PAGE_CONTEXT / pageObserve is missing or insufficient. Call path.find only when you need location and it is not already in context. Call knowledge.search AT MOST ONCE per user turn, and only when needed for operator-configured facts. After observation and any needed knowledge lookup, produce a final answer.\n")
 			.append("  5. NEVER call the same tool twice with the same arguments. The result will not change.\n")
 			.append("  6. If two observation calls have not given you what you need, stop calling tools. Give a final answer that says what you tried.\n")
 			.append("  7. If no action tool can fulfill the user's request, do NOT improvise. Give a final answer that politely tells the user to do it themselves. When you have real observation, reference what you saw (the current path, a section name, a button label) so the user knows where to act. When you do NOT have observation, do not invent one — just say so.\n")
@@ -840,7 +855,7 @@ public class RunService {
 			.append("\n")
 			.append("GUIDED WALKTHROUGHS (multi-step tours, onboarding, requests with \"then\"/\"next\", numbered steps, or navigation flows):\n")
 			.append("  - When the user asks for several things in sequence, guide them one step at a time — not a silent tour of every page.\n")
-			.append("  - Perform at most ONE navigation (app.navigate or a dedicated nav tool) per user message. Reading data (HTTP tools, page.screenshot) for the current step is fine in the same turn.\n")
+			.append("  - Perform at most ONE navigation (app.navigate or a dedicated nav tool) per user message. Reading data (HTTP tools, page.observe) for the current step is fine in the same turn.\n")
 			.append("  - After that navigation (or after finishing the current step's reads), STOP with a final answer: name the page, say what the user can do here, and preview the next step.\n")
 			.append("  - End every walkthrough pause with clickable options using this exact format (on their own lines at the end):\n")
 			.append("    OPTIONS: Continue to [next step] | Skip tour | Stay here\n")

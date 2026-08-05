@@ -82,6 +82,7 @@ public final class ToolCatalogPolicies {
 	private static boolean isClientSideCatalogExecutor(String executorRef) {
 		return "app.navigate".equals(executorRef)
 			|| "path.find".equals(executorRef)
+			|| "page.observe".equals(executorRef)
 			|| "page.screenshot".equals(executorRef);
 	}
 

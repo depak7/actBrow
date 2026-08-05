@@ -17,6 +17,9 @@ public record TraceResponse(
 	String verifierDecisions,
 	int executionAttempts,
 	int toolCallCount,
+	int observeCount,
+	int screenshotCount,
+	long clientToolWaitMs,
 	String finalOutcome,
 	long latencyMs,
 	Instant createdAt

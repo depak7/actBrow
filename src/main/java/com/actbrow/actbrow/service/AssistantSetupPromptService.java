@@ -90,7 +90,7 @@ public class AssistantSetupPromptService {
 			- Navigation tools use executor app.navigate via sync payload defaults (path in defaultArguments).
 			- Include EVERY origin the app is served from — local dev and production. A missing origin blocks the widget with a CORS error.
 			- Only include HTTP tools the app actually exposes.
-			- Do not create tools for path.find, page.screenshot, app.navigate or knowledge.search — they are built in and always available.
+			- Do not create tools for path.find, page.observe, page.screenshot, app.navigate or knowledge.search — they are built in and always available.
 			- Keep knowledge concise and operational.
 			- When done, state where you added the embed snippet, what you verified in step 9, and the coverage table from step 10.
 			""".formatted(

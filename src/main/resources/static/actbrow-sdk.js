@@ -22,14 +22,53 @@
     document.head.appendChild(style);
   }
 
+  /** Replaces an existing block, unlike injectStyles which no-ops when the id is already present. */
+  function replaceStyles(cssText, id) {
+    var existing = document.getElementById(id);
+    if (existing) {
+      existing.textContent = cssText;
+      return;
+    }
+    var style = document.createElement("style");
+    style.id = id;
+    style.textContent = cssText;
+    document.head.appendChild(style);
+  }
+
+  /**
+   * Black or white, whichever stays readable on the given colour. An operator can pick any accent,
+   * including a pale one, and hardcoding white text would make their own messages unreadable.
+   * Falls back to white for gradients and other values we cannot measure.
+   */
+  function readableOn(color) {
+    var match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(color || "").trim());
+    if (!match) {
+      return "#fff";
+    }
+    var hex = match[1];
+    if (hex.length === 3) {
+      hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    }
+    var channel = function (value) {
+      var c = parseInt(value, 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    var luminance =
+      0.2126 * channel(hex.slice(0, 2)) +
+      0.7152 * channel(hex.slice(2, 4)) +
+      0.0722 * channel(hex.slice(4, 6));
+    return luminance > 0.45 ? "#000" : "#fff";
+  }
+
   function pageTrackerState() {
     if (typeof window === "undefined") {
-      return { href: "", epoch: 1 };
+      return { href: "", epoch: 1, changed: false, changedAt: 0 };
     }
     if (!window.__actbrowPageTracker) {
       window.__actbrowPageTracker = {
         href: window.location ? window.location.href : "",
-        epoch: 1
+        epoch: 1,
+        changedAt: 0
       };
     }
     var tracker = window.__actbrowPageTracker;
@@ -38,11 +77,13 @@
     if (changed) {
       tracker.epoch += 1;
       tracker.href = href;
+      tracker.changedAt = Date.now();
     }
     return {
       href: href,
       epoch: tracker.epoch,
-      changed: changed
+      changed: changed,
+      changedAt: tracker.changedAt || 0
     };
   }
 
@@ -82,14 +123,17 @@
 
   /**
    * Resolve once the DOM has been quiet (no mutations) for `idleMs`. Caps total wait at
-   * `maxMs` so a continuously animating page can't hang the run. Used before
-   * page.screenshot so React route changes finish hydrating before we read innerText.
+   * `maxMs` so a continuously animating page can't hang the run. Used before image
+   * page.screenshot so React route changes finish hydrating before capture.
    */
   function waitForDomStable(idleMs, maxMs) {
     var idleTarget = typeof idleMs === "number" ? idleMs : 500;
     var deadline = Date.now() + (typeof maxMs === "number" ? maxMs : 4000);
+    var started = Date.now();
     if (typeof MutationObserver === "undefined" || !document.body) {
-      return new Promise(function (resolve) { setTimeout(resolve, idleTarget); });
+      return new Promise(function (resolve) {
+        setTimeout(function () { resolve({ settleMs: idleTarget }); }, idleTarget);
+      });
     }
     return new Promise(function (resolve) {
       var lastMutation = Date.now();
@@ -104,12 +148,34 @@
         var now = Date.now();
         if (now - lastMutation >= idleTarget || now >= deadline) {
           observer.disconnect();
-          resolve();
+          resolve({ settleMs: now - started });
           return;
         }
         setTimeout(tick, 50);
       }
       setTimeout(tick, idleTarget);
+    });
+  }
+
+  /**
+   * Short, epoch-aware settle for structured observation (page.observe / text snapshot).
+   * If the URL has been stable for a while, resolve immediately. After a recent navigation,
+   * wait briefly for mutations to quiet — never the image-path 500ms–4s floor.
+   */
+  function waitForPageSettled(idleMs, maxMs) {
+    var idleTarget = typeof idleMs === "number" ? idleMs : 100;
+    var maxWait = typeof maxMs === "number" ? maxMs : 150;
+    var pageState = pageTrackerState();
+    var ageMs = pageState.changedAt ? Date.now() - pageState.changedAt : Number.POSITIVE_INFINITY;
+    // Same-page re-observe or already settled after nav — skip the idle floor.
+    if (!pageState.changed && ageMs >= maxWait) {
+      return Promise.resolve({ settleMs: 0, pageEpoch: pageState.epoch });
+    }
+    return waitForDomStable(idleTarget, maxWait).then(function (info) {
+      return {
+        settleMs: info && typeof info.settleMs === "number" ? info.settleMs : 0,
+        pageEpoch: pageTrackerState().epoch
+      };
     });
   }
 
@@ -201,35 +267,34 @@
     }
   }
 
-  function textSnapshotResult(loc, imageError) {
-    var rawText = (document.body && document.body.innerText) || "";
-    var visibleText = rawText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-    var labels = collectSemanticLabels(200);
-    if (labels.length > 0) {
-      visibleText = visibleText + "\n\n--- Labels (alt / aria-label / placeholder) ---\n" + labels.join("\n");
+  function textSnapshotResult(loc, imageError, settleMs) {
+    // Text mode is aliased to structure-first observe, preserving visibleText for prompt rule 2a.
+    var result = structuredObserveToolResult({
+      maxElements: 60,
+      maxVisibleChars: 12000,
+      settleMs: typeof settleMs === "number" ? settleMs : 0
+    });
+    try {
+      var payload = JSON.parse(result.structuredOutput);
+      payload.mode = "text";
+      if (imageError) {
+        payload.imageError = imageError;
+      }
+      result.structuredOutput = JSON.stringify(payload);
+      result.textSummary = imageError
+        ? "Image capture failed; returned text snapshot of " + (loc.pathname || "/") + " ("
+          + (payload.visibleText ? payload.visibleText.length : 0) + " chars, "
+          + (payload.elementCount || 0) + " elements"
+          + (payload.truncated ? ", truncated" : "") + ")"
+        : "Page snapshot of " + (loc.pathname || "/") + " ("
+          + (payload.visibleText ? payload.visibleText.length : 0) + " chars, "
+          + (payload.elementCount || 0) + " elements"
+          + (payload.truncated ? ", truncated" : "")
+          + ", settle " + (payload.settleMs || 0) + "ms)";
+    } catch (e) {
+      // Keep structured observe result as-is.
     }
-    var maxChars = 12000;
-    var truncated = false;
-    if (visibleText.length > maxChars) {
-      visibleText = visibleText.slice(0, maxChars);
-      truncated = true;
-    }
-    return {
-      success: true,
-      structuredOutput: JSON.stringify({
-        mode: "text",
-        path: loc.pathname || "",
-        url: loc.href || "",
-        title: document.title || "",
-        visibleText: visibleText,
-        labelCount: labels.length,
-        truncated: truncated,
-        imageError: imageError || null
-      }),
-      textSummary: imageError
-        ? "Image capture failed; returned text snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
-        : "Page snapshot of " + (loc.pathname || "/") + " (" + visibleText.length + " chars, " + labels.length + " labels" + (truncated ? ", truncated" : "") + ")"
-    };
+    return result;
   }
 
   var forbiddenBrowserHttpHeaders = {
@@ -348,8 +413,83 @@
     return tag;
   }
 
+  function roleForElement(el) {
+    if (!el) return "generic";
+    var explicit = (el.getAttribute && el.getAttribute("role") || "").trim();
+    if (explicit) return explicit;
+    var tag = el.tagName ? el.tagName.toLowerCase() : "";
+    if (tag === "a") return "link";
+    if (tag === "button") return "button";
+    if (tag === "select") return "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "input") {
+      var t = (el.getAttribute("type") || "text").toLowerCase();
+      if (t === "submit" || t === "button" || t === "reset" || t === "image") return "button";
+      if (t === "checkbox") return "checkbox";
+      if (t === "radio") return "radio";
+      if (t === "search") return "searchbox";
+      if (t === "range") return "slider";
+      return "textbox";
+    }
+    if (el.getAttribute && el.getAttribute("contenteditable") === "true") return "textbox";
+    return tag || "generic";
+  }
+
+  function accessibleNameForElement(el, visibleText) {
+    if (!el) return null;
+    var aria = (el.getAttribute && el.getAttribute("aria-label") || "").trim();
+    if (aria) return aria.slice(0, 120);
+    var labelledBy = el.getAttribute && el.getAttribute("aria-labelledby");
+    if (labelledBy && typeof document !== "undefined" && document.getElementById) {
+      var parts = String(labelledBy).split(/\s+/);
+      var buf = [];
+      for (var i = 0; i < parts.length; i++) {
+        var refEl = document.getElementById(parts[i]);
+        if (refEl) {
+          var refText = (refEl.innerText || refEl.textContent || "").replace(/\s+/g, " ").trim();
+          if (refText) buf.push(refText);
+        }
+      }
+      if (buf.length) return buf.join(" ").slice(0, 120);
+    }
+    var ph = (el.getAttribute && el.getAttribute("placeholder") || "").trim();
+    if (ph) return ph.slice(0, 120);
+    var title = (el.getAttribute && el.getAttribute("title") || "").trim();
+    if (title) return title.slice(0, 120);
+    var alt = (el.getAttribute && el.getAttribute("alt") || "").trim();
+    if (alt) return alt.slice(0, 120);
+    if (visibleText) return String(visibleText).slice(0, 120);
+    var name = (el.getAttribute && el.getAttribute("name") || "").trim();
+    return name ? name.slice(0, 120) : null;
+  }
+
+  function collectHeadings(maxItems) {
+    var cap = typeof maxItems === "number" ? maxItems : 20;
+    var out = [];
+    if (typeof document === "undefined" || !document.querySelectorAll) {
+      return out;
+    }
+    var nodes = document.querySelectorAll("h1, h2, h3, h4, [role='heading']");
+    for (var i = 0; i < nodes.length && out.length < cap; i++) {
+      var el = nodes[i];
+      if (!isProbablyVisible(el)) continue;
+      var text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160);
+      if (!text) continue;
+      var level = 0;
+      var tag = el.tagName ? el.tagName.toLowerCase() : "";
+      if (tag.charAt(0) === "h" && tag.length === 2) {
+        level = parseInt(tag.charAt(1), 10) || 0;
+      } else {
+        level = parseInt(el.getAttribute("aria-level") || "0", 10) || 0;
+      }
+      out.push({ level: level || null, text: text });
+    }
+    return out;
+  }
+
   /**
    * Collects visible-ish interactive controls and suggested selectors for the LLM.
+   * Structure-first: each element gets a stable ref, inferred ARIA role, and accessible name.
    * @param options {{ maxElements?: number }}
    */
   function collectPageContext(options) {
@@ -365,8 +505,15 @@
       "button",
       'a[href]',
       '[role="button"]',
+      '[role="link"]',
       '[role="searchbox"]',
       '[role="textbox"]',
+      '[role="checkbox"]',
+      '[role="radio"]',
+      '[role="menuitem"]',
+      '[role="tab"]',
+      '[role="option"]',
+      '[role="switch"]',
       '[contenteditable="true"]'
     ].join(", ");
     var nodes = document.querySelectorAll(selectorList);
@@ -379,11 +526,17 @@
       if (!isProbablyVisible(el)) continue;
       seen.push(el);
       var text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      var role = roleForElement(el);
+      var name = accessibleNameForElement(el, text);
+      var ref = "e" + (elements.length + 1);
       elements.push({
+        ref: ref,
+        role: role,
+        name: name,
         selector: stableSelectorForElement(el),
         tag: el.tagName,
         type: el.getAttribute("type") || null,
-        name: el.getAttribute("name") || null,
+        nameAttr: el.getAttribute("name") || null,
         id: el.id || null,
         placeholder: el.getAttribute("placeholder") || null,
         ariaLabel: el.getAttribute("aria-label") || null,
@@ -397,8 +550,95 @@
       pageEpoch: pageState.epoch,
       pageChanged: pageState.changed,
       collectedAt: new Date().toISOString(),
+      headings: collectHeadings(20),
       elements: elements
     };
+  }
+
+  /**
+   * Compact structured observation payload (Playwright-MCP / AXTree style).
+   * Prefer this over image screenshots for in-app SaaS pages.
+   */
+  function buildStructuredObservePayload(options) {
+    var maxEl = (options && options.maxElements) || 60;
+    var maxChars = (options && options.maxVisibleChars) || 8000;
+    var settleMs = (options && options.settleMs) || 0;
+    var page = collectPageContext({ maxElements: maxEl });
+    var loc = typeof location !== "undefined" ? location : {};
+    if (!page) {
+      return {
+        mode: "observe",
+        path: loc.pathname || "",
+        url: loc.href || "",
+        title: "",
+        pageEpoch: 1,
+        settleMs: settleMs,
+        headings: [],
+        elements: [],
+        visibleText: "",
+        truncated: false
+      };
+    }
+    var rawText = (document.body && document.body.innerText) || "";
+    var visibleText = rawText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    var labels = collectSemanticLabels(120);
+    if (labels.length > 0) {
+      visibleText = visibleText + "\n\n--- Labels (alt / aria-label / placeholder) ---\n" + labels.join("\n");
+    }
+    var truncated = false;
+    if (visibleText.length > maxChars) {
+      visibleText = visibleText.slice(0, maxChars);
+      truncated = true;
+    }
+    return {
+      mode: "observe",
+      path: page.path || loc.pathname || "",
+      url: page.url || loc.href || "",
+      title: page.title || "",
+      pageEpoch: page.pageEpoch,
+      settleMs: settleMs,
+      headings: page.headings || [],
+      elements: page.elements || [],
+      visibleText: visibleText,
+      elementCount: (page.elements || []).length,
+      truncated: truncated
+    };
+  }
+
+  function structuredObserveToolResult(options) {
+    var payload = buildStructuredObservePayload(options || {});
+    return {
+      success: true,
+      structuredOutput: JSON.stringify(payload),
+      textSummary: "Page observe of " + (payload.path || "/") + " (" + payload.elementCount
+        + " elements, " + (payload.visibleText ? payload.visibleText.length : 0) + " chars"
+        + (payload.truncated ? ", truncated" : "")
+        + ", settle " + (payload.settleMs || 0) + "ms)"
+    };
+  }
+
+  function enrichNavigateWithObserve(result) {
+    if (!result || result.success === false) {
+      return result;
+    }
+    try {
+      var observe = buildStructuredObservePayload({ maxElements: 60, maxVisibleChars: 4000, settleMs: 0 });
+      var parsed = {};
+      if (result.structuredOutput) {
+        try {
+          parsed = JSON.parse(result.structuredOutput) || {};
+        } catch (e) {
+          parsed = { raw: result.structuredOutput };
+        }
+      }
+      parsed.pageObserve = observe;
+      result.structuredOutput = JSON.stringify(parsed);
+      result.textSummary = (result.textSummary || "Navigated")
+        + "; attached page observe (" + observe.elementCount + " elements)";
+    } catch (e) {
+      // Observation attach is best-effort — never fail navigation because of it.
+    }
+    return result;
   }
 
   function navigationTargetFromArgs(args) {
@@ -534,25 +774,27 @@
         if (target.path) {
           if (isAlreadyOnRoute(target.path)) {
             debugLog(config, "already on path", target.path);
-            return {
+            return enrichNavigateWithObserve({
               success: true,
               structuredOutput: JSON.stringify({ path: target.path, alreadyOnPage: true }),
               textSummary: "Already on " + target.path
-            };
+            });
           }
         }
         var configuredNavigation = runConfiguredNavigation(config, target, args);
         if (configuredNavigation) {
-          return configuredNavigation;
+          return Promise.resolve(configuredNavigation).then(enrichNavigateWithObserve);
         }
         if (target.path) {
           history.pushState({}, "", target.path);
           window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
-          return {
+          // Bump epoch immediately so observe sees the new route.
+          pageTrackerState();
+          return enrichNavigateWithObserve({
             success: true,
             structuredOutput: JSON.stringify({ path: target.path }),
             textSummary: "Navigated to " + target.path
-          };
+          });
         }
         if (target.url) {
           window.location.assign(target.url);
@@ -568,10 +810,25 @@
           textSummary: "No path or URL provided"
         };
       },
+      /**
+       * Structure-first observation: interactive elements with ref/role/name + headings +
+       * capped visibleText. Prefer this over page.screenshot for in-app SaaS pages.
+       */
+      "page.observe": function () {
+        return waitForPageSettled(100, 150).then(function (settle) {
+          return structuredObserveToolResult({
+            maxElements: 60,
+            maxVisibleChars: 8000,
+            settleMs: settle && settle.settleMs ? settle.settleMs : 0
+          });
+        });
+      },
       "page.screenshot": function () {
-        return waitForDomStable(500, 4000).then(function () {
-          var loc = typeof location !== "undefined" ? location : {};
-          if (config.snapshotMode === "image") {
+        var loc = typeof location !== "undefined" ? location : {};
+        if (config.snapshotMode === "image") {
+          // Vision fallback only: keep the longer DOM-idle wait so hydration finishes before capture.
+          return waitForDomStable(500, 4000).then(function (info) {
+            var settleMs = info && typeof info.settleMs === "number" ? info.settleMs : 0;
             return loadHtml2Canvas().then(function (html2canvas) {
               return html2canvas(document.body, {
                 logging: false,
@@ -590,15 +847,21 @@
                   path: loc.pathname || "",
                   url: loc.href || "",
                   title: document.title || "",
+                  settleMs: settleMs,
                   imageBase64: dataUrl
                 }),
                 textSummary: "Page snapshot of " + (loc.pathname || "/") + " (image, " + kb + "KB)"
               };
             }).catch(function (error) {
-              return textSnapshotResult(loc, "Image capture failed: " + (error && error.message ? error.message : String(error)));
+              return textSnapshotResult(loc,
+                "Image capture failed: " + (error && error.message ? error.message : String(error)),
+                settleMs);
             });
-          }
-          return textSnapshotResult(loc);
+          });
+        }
+        // Text mode is an alias of structure-first observe (short settle, no 500ms floor).
+        return waitForPageSettled(100, 150).then(function (settle) {
+          return textSnapshotResult(loc, null, settle && settle.settleMs ? settle.settleMs : 0);
         });
       }
     };
@@ -1425,6 +1688,19 @@
     var labels = config.labels || {};
     if (theme.title && labels.title === undefined) labels.title = theme.title;
     if (theme.subtitle && labels.subtitle === undefined) labels.subtitle = theme.subtitle;
+    // Accent previously only tinted the launcher's 1px border, so the dashboard preview promised
+    // far more than the widget delivered. It now drives the surfaces a brand colour is actually
+    // expected to reach: the user's own messages and the send button.
+    if (theme.accent) {
+      var accentText = readableOn(theme.accent);
+      replaceStyles([
+        ".actbrow-widget-message-user{background:" + theme.accent + ";color:" + accentText + ";}",
+        ".actbrow-widget-send{background:" + theme.accent + ";color:" + accentText + ";}",
+        ".actbrow-widget-send:hover{background:" + theme.accent + ";filter:brightness(1.1);}",
+        ".actbrow-widget-message-option-recommended{border-color:" + theme.accent + ";}"
+      ].join(""), "actbrow-widget-styles-accent");
+    }
+
     var suggestions = Array.isArray(config.suggestions)
       ? config.suggestions.filter(function (s) { return typeof s === "string" && s.trim(); })
       : [];

@@ -135,6 +135,9 @@ class RunInspectionServiceTests {
 		assertThat(response.trace().runId()).isEqualTo("run-5");
 		assertThat(response.trace().executionAttempts()).isEqualTo(2);
 		assertThat(response.trace().toolCallCount()).isEqualTo(3);
+		assertThat(response.trace().observeCount()).isEqualTo(0);
+		assertThat(response.trace().screenshotCount()).isEqualTo(0);
+		assertThat(response.trace().clientToolWaitMs()).isEqualTo(0L);
 		assertThat(response.trace().latencyMs()).isEqualTo(4_200L);
 		assertThat(response.trace().finalOutcome()).isEqualTo("failed");
 	}

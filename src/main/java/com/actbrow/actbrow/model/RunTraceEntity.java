@@ -49,6 +49,15 @@ public class RunTraceEntity {
 	private int toolCallCount;
 
 	@Column
+	private int observeCount;
+
+	@Column
+	private int screenshotCount;
+
+	@Column
+	private long clientToolWaitMs;
+
+	@Column
 	private String finalOutcome;
 
 	@Column
@@ -141,6 +150,30 @@ public class RunTraceEntity {
 
 	public void setToolCallCount(int toolCallCount) {
 		this.toolCallCount = toolCallCount;
+	}
+
+	public int getObserveCount() {
+		return observeCount;
+	}
+
+	public void setObserveCount(int observeCount) {
+		this.observeCount = observeCount;
+	}
+
+	public int getScreenshotCount() {
+		return screenshotCount;
+	}
+
+	public void setScreenshotCount(int screenshotCount) {
+		this.screenshotCount = screenshotCount;
+	}
+
+	public long getClientToolWaitMs() {
+		return clientToolWaitMs;
+	}
+
+	public void setClientToolWaitMs(long clientToolWaitMs) {
+		this.clientToolWaitMs = clientToolWaitMs;
 	}
 
 	public String getFinalOutcome() {

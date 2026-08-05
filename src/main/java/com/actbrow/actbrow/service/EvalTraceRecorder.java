@@ -51,6 +51,34 @@ public class EvalTraceRecorder {
 		}
 	}
 
+	/**
+	 * Record a client-side observation tool and how long the run thread parked waiting for the SDK.
+	 * {@code toolKey} should be the catalog key ({@code page.observe} / {@code page.screenshot}).
+	 */
+	public void recordObservationTool(String runId, String toolKey, long clientWaitMs) {
+		Builder builder = inFlight.get(runId);
+		if (builder == null) {
+			return;
+		}
+		if ("page.observe".equals(toolKey)) {
+			builder.observeCount.incrementAndGet();
+		}
+		else if ("page.screenshot".equals(toolKey)) {
+			builder.screenshotCount.incrementAndGet();
+		}
+		if (clientWaitMs > 0) {
+			builder.clientToolWaitMs.addAndGet(clientWaitMs);
+		}
+	}
+
+	/** Accumulate park time for any client / browser-HTTP tool (navigate, path.find, etc.). */
+	public void recordClientToolWait(String runId, long clientWaitMs) {
+		Builder builder = inFlight.get(runId);
+		if (builder != null && clientWaitMs > 0) {
+			builder.clientToolWaitMs.addAndGet(clientWaitMs);
+		}
+	}
+
 	public void recordVerifier(String runId, String decision) {
 		Builder builder = inFlight.get(runId);
 		if (builder != null) {
@@ -75,6 +103,9 @@ public class EvalTraceRecorder {
 			entity.setVerifierDecisions(String.join("\n", builder.verifierDecisions));
 			entity.setExecutionAttempts(builder.executionAttempts.get());
 			entity.setToolCallCount(builder.toolCallCount.get());
+			entity.setObserveCount(builder.observeCount.get());
+			entity.setScreenshotCount(builder.screenshotCount.get());
+			entity.setClientToolWaitMs(builder.clientToolWaitMs.get());
 			entity.setFinalOutcome(finalOutcome);
 			entity.setLatencyMs(latencyMs);
 			repository.save(entity);
@@ -98,6 +129,10 @@ public class EvalTraceRecorder {
 		private final List<String> verifierDecisions = new CopyOnWriteArrayList<>();
 		private final AtomicInteger executionAttempts = new AtomicInteger();
 		private final AtomicInteger toolCallCount = new AtomicInteger();
+		private final AtomicInteger observeCount = new AtomicInteger();
+		private final AtomicInteger screenshotCount = new AtomicInteger();
+		private final java.util.concurrent.atomic.AtomicLong clientToolWaitMs =
+			new java.util.concurrent.atomic.AtomicLong();
 
 		private Builder(String conversationId, String assistantId, String promptVersion, String toolsetVersion) {
 			this.conversationId = conversationId;

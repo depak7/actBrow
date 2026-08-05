@@ -41,4 +41,18 @@ class BuiltinToolCatalogTests {
 
 		assertThat(tools.stream().map(tool -> tool.key())).contains("knowledge.search");
 	}
+
+	@Test
+	void seedsStructureFirstObservationTools() {
+		assertThat(toolRepository.findByKey("page.observe")).isPresent();
+		assertThat(toolRepository.findByKey("page.screenshot")).isPresent();
+
+		var assistant = assistantService.createOrUpdate(new CreateAssistantRequest(
+			"Observe", "Observe pages", "gemini-2.5-flash", false, "observe-tool-user"));
+		var keys = toolService.listDescriptorsForAssistant(assistant.id()).stream()
+			.map(tool -> tool.key())
+			.toList();
+
+		assertThat(keys).contains("page.observe", "page.screenshot", "path.find", "app.navigate");
+	}
 }

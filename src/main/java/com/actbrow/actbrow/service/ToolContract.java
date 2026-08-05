@@ -65,7 +65,7 @@ public record ToolContract(
 			|| tool.type() == com.actbrow.actbrow.model.ToolType.MCP)) {
 			return SideEffectLevel.WRITE;
 		}
-		// Built-in observation and client tools (path.find, page.screenshot, app.navigate) only read.
+		// Built-in observation and client tools (path.find, page.observe, page.screenshot, app.navigate) only read.
 		return SideEffectLevel.READ;
 	}
 

@@ -217,8 +217,8 @@ class RunLoopQueryCountTests {
 			new CreateAssistantRequest("Perf Tool Assistant", "be helpful", null, false, "perf-user-2"));
 		ConversationResponse conversation = conversationService.create(new ConversationRequest(assistant.id()));
 
-		// knowledge.search is the one built-in that executes server-side. path.find and
-		// page.screenshot are dispatched into the browser, so in a headless test they would park on
+		// knowledge.search is the one built-in that executes server-side. path.find,
+		// page.observe and page.screenshot are dispatched into the browser, so in a headless test they would park on
 		// the pending-tool future for the full tool timeout and measure the timeout, not the loop.
 		ScriptedModelConfig.TOOL_KEY_TO_CALL = "knowledge.search";
 		ScriptedModelConfig.STEP_COUNT.set(0);

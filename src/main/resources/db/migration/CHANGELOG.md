@@ -24,6 +24,10 @@
     read on every planning step. Measured on a 40k-row local table: 2864 → 210 shared buffer reads.
   - All statements are `IF NOT EXISTS`, so this is a no-op where an environment already has them.
 
+- `V20260805__run_trace_observation_metrics.sql`
+  - Adds `run_traces.observe_count`, `screenshot_count`, `client_tool_wait_ms` for structure-first
+    observation telemetry (loop-layer latency outside the model API).
+
 ## Flyway notes
 
 Flyway is enabled (`spring.flyway.enabled=true`, `baseline-on-migrate=true`, `baseline-version=0`).

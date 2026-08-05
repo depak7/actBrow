@@ -231,7 +231,8 @@ public class ProgressiveToolDisclosureService {
 			return true;
 		}
 		String key = tool.key();
-		return "app.navigate".equals(key) || "path.find".equals(key) || "page.screenshot".equals(key)
+		return "app.navigate".equals(key) || "path.find".equals(key) || "page.observe".equals(key)
+			|| "page.screenshot".equals(key)
 			|| "knowledge.search".equals(key) || isMetaTool(key);
 	}
 

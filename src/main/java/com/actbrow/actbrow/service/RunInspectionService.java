@@ -152,6 +152,7 @@ public class RunInspectionService {
 		return new TraceResponse(trace.getId(), trace.getRunId(), trace.getConversationId(), trace.getAssistantId(),
 			trace.getPromptVersion(), trace.getToolsetVersion(), trace.getPlanningOutcomes(),
 			trace.getVerifierDecisions(), trace.getExecutionAttempts(), trace.getToolCallCount(),
+			trace.getObserveCount(), trace.getScreenshotCount(), trace.getClientToolWaitMs(),
 			trace.getFinalOutcome(), trace.getLatencyMs(), trace.getCreatedAt());
 	}
 }
