@@ -79,6 +79,61 @@ public final class ToolCatalogPolicies {
 		return type == ToolType.MCP || "mcp.call".equals(executorRef);
 	}
 
+	/**
+	 * Which specialist owns this tool. SHARED tools are offered in every specialist; BROWSER and API
+	 * tools only when that specialist is active.
+	 */
+	public static ToolDomain domainOf(ToolDescriptor tool) {
+		if (tool == null) {
+			return ToolDomain.SHARED;
+		}
+		String key = tool.key();
+		if (ProgressiveToolDisclosureService.isMetaOrAgentSwitchTool(key)
+			|| executesAsKnowledgeSearch(tool.type(), tool.executorRef())) {
+			return ToolDomain.SHARED;
+		}
+		if (executesAsClientPendingTool(tool.type(), tool.executorRef())
+			|| executesAsBrowserHttpTool(tool)) {
+			return ToolDomain.BROWSER;
+		}
+		if (executesAsMcpTool(tool.type(), tool.executorRef())) {
+			return ToolDomain.API;
+		}
+		if (executesAsHttpTool(tool.type(), tool.executorRef())) {
+			// Non-browser SERVER_HTTP runs on the server — API specialist.
+			return ToolDomain.API;
+		}
+		// Unknown custom types default to API so operator-added tools stay with the API specialist.
+		if (tool.type() == ToolType.BUILD_IN) {
+			return ToolDomain.BROWSER;
+		}
+		return ToolDomain.API;
+	}
+
+	/**
+	 * Server-side tools that do not park the run on the client may run concurrently on virtual
+	 * threads when the model emits multiple calls in one step.
+	 */
+	public static boolean isParallelSafe(ToolDescriptor tool) {
+		if (tool == null) {
+			return false;
+		}
+		// Meta tools mutate specialist/active-set state — never fan out beside other calls.
+		if (ProgressiveToolDisclosureService.isMetaOrAgentSwitchTool(tool.key())) {
+			return false;
+		}
+		if (executesAsClientPendingTool(tool.type(), tool.executorRef())
+			|| executesAsBrowserHttpTool(tool)) {
+			return false;
+		}
+		// Navigate is client-pending above; keep an explicit guard for key-only matches.
+		String key = tool.key();
+		if ("app.navigate".equals(key) || "app.navigate".equals(tool.executorRef())) {
+			return false;
+		}
+		return true;
+	}
+
 	private static boolean isClientSideCatalogExecutor(String executorRef) {
 		return "app.navigate".equals(executorRef)
 			|| "path.find".equals(executorRef)
@@ -89,6 +144,8 @@ public final class ToolCatalogPolicies {
 	private static boolean isServerSideCatalogExecutor(String executorRef) {
 		return "knowledge.search".equals(executorRef)
 			|| ProgressiveToolDisclosureService.TOOL_SEARCH.equals(executorRef)
-			|| ProgressiveToolDisclosureService.TOOL_ACTIVATE.equals(executorRef);
+			|| ProgressiveToolDisclosureService.TOOL_ACTIVATE.equals(executorRef)
+			|| ProgressiveToolDisclosureService.AGENT_USE_BROWSER.equals(executorRef)
+			|| ProgressiveToolDisclosureService.AGENT_USE_API.equals(executorRef);
 	}
 }

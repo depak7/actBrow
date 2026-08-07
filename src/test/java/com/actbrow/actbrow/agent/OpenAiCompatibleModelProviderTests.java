@@ -122,6 +122,41 @@ class OpenAiCompatibleModelProviderTests {
 	}
 
 	@Test
+	void inventedToolNameDoesNotThrowAndPassesThroughUnresolved() {
+		ChatModel chatModel = stubChatModel(new AtomicReference<>(),
+			toolCallResponse("call-1", "browser_click", "{\"selector\":\"#go\"}"));
+		OpenAiCompatibleModelProvider provider = new OpenAiCompatibleModelProvider(chatModel, objectMapper);
+
+		List<ToolDescriptor> tools = List.of(descriptor("t1", "app.navigate"), descriptor("t2", "page.observe"));
+		ModelDecision decision = provider.decideNextStep("gpt-4o", "system", List.of(userMessage("hi")), tools, 0);
+
+		ToolCall call = assertInstanceOf(ToolCallDecision.class, decision).toolCalls().get(0);
+		assertEquals(null, call.toolId(), "Invented tools must not invent a descriptor id");
+		assertEquals("browser_click", call.toolKey());
+		assertEquals(Map.of("selector", "#go"), call.arguments());
+	}
+
+	@Test
+	void sanitizedKeyEquivalenceResolvesActiveTool() {
+		ChatModel chatModel = stubChatModel(new AtomicReference<>(),
+			toolCallResponse("call-1", "page_observe", "{}"));
+		OpenAiCompatibleModelProvider provider = new OpenAiCompatibleModelProvider(chatModel, objectMapper);
+
+		// Offer under a wire name that is NOT page_observe (collision suffix would change it), using
+		// resolveRequestedTool directly for the soft-match path when wire map misses.
+		List<ToolDescriptor> tools = List.of(descriptor("t1", "page.observe"));
+		Map<String, ToolDescriptor> emptyWireMap = Map.of();
+		ToolDescriptor resolved = OpenAiCompatibleModelProvider.resolveRequestedTool("page_observe", tools, emptyWireMap);
+		assertEquals("t1", resolved.id());
+		assertEquals("page.observe", resolved.key());
+
+		// End-to-end: wire map already has page_observe for page.observe, so native path still works.
+		ModelDecision decision = provider.decideNextStep("gpt-4o", "system", List.of(userMessage("hi")), tools, 0);
+		ToolCall call = assertInstanceOf(ToolCallDecision.class, decision).toolCalls().get(0);
+		assertEquals("page.observe", call.toolKey());
+	}
+
+	@Test
 	void longCollidingKeysAreTruncatedTo64AndStayUnique() {
 		String longPrefix = "x".repeat(70);
 		List<ToolDescriptor> tools = List.of(

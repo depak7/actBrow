@@ -46,14 +46,29 @@ class ToolSearchRankingTests {
 			ToolType.SERVER_HTTP, key, Map.of(), Map.of());
 	}
 
+	@SuppressWarnings("unchecked")
 	private List<String> searchKeys(List<ToolDescriptor> catalog, String query) {
-		ToolExecutionResult result = service.execute(new RunEntity(), catalog,
+		RunEntity run = new RunEntity();
+		run.setId("search-ranking-run");
+		ToolExecutionResult result = service.execute(run, catalog,
 			ProgressiveToolDisclosureService.TOOL_SEARCH, Map.of("query", query));
 		assertThat(result.success()).isTrue();
 		try {
-			List<Map<String, Object>> cards = objectMapper.readValue(result.structuredOutput(),
-				objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class));
-			return cards.stream().map(card -> String.valueOf(card.get("key"))).toList();
+			Map<String, Object> body = objectMapper.readValue(result.structuredOutput(), Map.class);
+			Object tools = body.get("tools");
+			if (!(tools instanceof List<?> cards)) {
+				throw new AssertionError("search body missing tools array: " + result.structuredOutput());
+			}
+			List<String> keys = new java.util.ArrayList<>();
+			for (Object card : cards) {
+				if (card instanceof Map<?, ?> map) {
+					keys.add(String.valueOf(map.get("key")));
+				}
+			}
+			return keys;
+		}
+		catch (AssertionError e) {
+			throw e;
 		}
 		catch (Exception e) {
 			throw new AssertionError("search output was not parseable JSON", e);

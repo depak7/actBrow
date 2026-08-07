@@ -40,13 +40,19 @@ public class BuiltinToolCatalog {
 	public List<ToolRequest> builtInClientTools() {
 		return List.of(
 			new ToolRequest("app.navigate", "App Navigate",
-				"Navigate the user to a path inside the host app (e.g. /orders, /settings). Use this to move; do not use it to read. "
-					+ "On success the result includes a pageObserve snapshot of the destination — do not call page.observe again "
-					+ "in the same turn unless that snapshot is missing or clearly stale.",
+				"Navigate the user to an absolute path from the app root (e.g. /orders, /deepak/60min). "
+					+ "path always starts with / and must NOT be prefixed with the current page path — if you are on "
+					+ "/event-types and the destination is /deepak/60min, call path=/deepak/60min (not "
+					+ "/event-types/deepak/60min). Prefer an observed link's href when present. Use this to move; do not "
+					+ "use it to read. On success the result includes a pageObserve snapshot of the destination — do not "
+					+ "call page.observe again in the same turn unless that snapshot is missing or clearly stale.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of(
-						"path", Map.of("type", "string"),
+						"path", Map.of(
+							"type", "string",
+							"description",
+							"Absolute app path from root, starting with /. Never join onto the current page path."),
 						"url", Map.of("type", "string"))),
 				null, ToolType.BUILD_IN, "1", true, "app.navigate", Map.of(), Map.of()),
 			new ToolRequest("path.find", "Current Location",
@@ -57,9 +63,10 @@ public class BuiltinToolCatalog {
 				null, ToolType.BUILD_IN, "1", true, "path.find", Map.of(), Map.of()),
 			new ToolRequest("page.observe", "Page Observe",
 				"Return a compact structured snapshot of the current page: interactive elements (ref, role, accessible name, "
-					+ "selector), headings, path/url/title, and capped visibleText. Prefer this (and PAGE_CONTEXT on the user "
-					+ "message) over page.screenshot for answering what is on screen. Call at most once per user turn, and skip "
-					+ "if PAGE_CONTEXT or a recent navigate pageObserve already answers the question.",
+					+ "selector, and href for links), headings, path/url/title, and capped visibleText. Prefer this (and "
+					+ "PAGE_CONTEXT on the user message) over page.screenshot for answering what is on screen. Call at most "
+					+ "once per user turn, and skip if PAGE_CONTEXT or a recent navigate pageObserve already answers the "
+					+ "question.",
 				Map.of(
 					"type", "object",
 					"properties", Map.of()),

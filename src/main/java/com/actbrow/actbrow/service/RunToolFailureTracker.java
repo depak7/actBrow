@@ -29,7 +29,8 @@ final class RunToolFailureTracker {
 		this.maxToolRetries = Math.max(0, maxToolRetries);
 	}
 
-	GuardDecision beforeToolCall(String toolKey, String signature) {
+	/** Synchronized: API specialist may execute multiple tools on virtual threads in one step. */
+	synchronized GuardDecision beforeToolCall(String toolKey, String signature) {
 		Integer priorExactAttempts = attemptsBySignature.get(signature);
 		if (priorExactAttempts != null) {
 			return new GuardDecision(false, duplicateCallResult(toolKey, priorExactAttempts));
@@ -41,7 +42,8 @@ final class RunToolFailureTracker {
 		return new GuardDecision(true, null);
 	}
 
-	void recordResult(String toolKey, String signature, ToolExecutionResult result) {
+	/** Synchronized: concurrent parallel API calls share one tracker per run. */
+	synchronized void recordResult(String toolKey, String signature, ToolExecutionResult result) {
 		attemptsByTool.merge(toolKey, 1, Integer::sum);
 		attemptsBySignature.merge(signature, 1, Integer::sum);
 		if (result == null || result.success()) {
@@ -55,7 +57,8 @@ final class RunToolFailureTracker {
 		}
 	}
 
-	ToolExecutionResult executorFailureResult(String toolKey, Exception exception) {
+	/** Synchronized: reads attempt counters while parallel calls may still be finishing. */
+	synchronized ToolExecutionResult executorFailureResult(String toolKey, Exception exception) {
 		String error = exception == null ? "Tool execution failed." : compactThrowable(exception);
 		int nextFailureNumber = failuresByTool.getOrDefault(toolKey, 0) + 1;
 		int retriesLeft = Math.max(0, maxToolRetries - nextFailureNumber);
@@ -79,13 +82,13 @@ final class RunToolFailureTracker {
 		return new ToolExecutionResult(false, toJson(envelope), text, error);
 	}
 
-	String buildRuntimeGuidance() {
+	synchronized String buildRuntimeGuidance() {
 		if (recentFailures.isEmpty()) {
 			return "";
 		}
 		StringBuilder builder = new StringBuilder();
 		builder.append("RUNTIME RETRY STATE FOR THIS RUN:\n");
-		builder.append("  - Tool failures are recoverable. Learn from the latest tool result and continue if a corrected next action is available.\n");
+		builder.append("  - Recovery recipe: (1) what failed (2) what is still safe (3) next valid action.\n");
 		builder.append("  - Never repeat the same tool with the same arguments inside this run.\n");
 		builder.append("  - A tool may fail at most ").append(maxToolRetries + 1)
 			.append(" times in this run before it is considered exhausted.\n");

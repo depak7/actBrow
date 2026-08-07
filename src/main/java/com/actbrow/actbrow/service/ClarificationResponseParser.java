@@ -5,6 +5,16 @@ import java.util.List;
 
 public final class ClarificationResponseParser {
 
+	private static final String OPTIONS_KEY = "OPTIONS:";
+
+	private static final String RECOMMENDED_KEY = "RECOMMENDED:";
+
+	/** Bullets and numbering models like to prepend to a directive line. */
+	private static final String LEADING_BULLET = "^(?:[-*•+]\\s+|\\d+[.)]\\s+)";
+
+	/** Markdown emphasis wrapped around a directive keyword, e.g. **OPTIONS:**. */
+	private static final String LEADING_EMPHASIS = "^[*_]{1,2}";
+
 	private ClarificationResponseParser() {
 	}
 
@@ -17,17 +27,19 @@ public final class ClarificationResponseParser {
 		List<String> options = List.of();
 		String recommended = null;
 		for (int i = 0; i < lines.size(); i++) {
-			String trimmed = lines.get(i).trim();
-			if (trimmed.startsWith("OPTIONS:")) {
+			String optionsValue = directiveValue(lines.get(i), OPTIONS_KEY);
+			if (optionsValue != null) {
 				optionsLineIndex = i;
-				options = Arrays.stream(trimmed.substring("OPTIONS:".length()).split("\\|"))
-					.map(String::trim)
+				options = Arrays.stream(optionsValue.split("\\|"))
+					.map(ClarificationResponseParser::cleanLabel)
 					.filter(s -> !s.isBlank())
 					.limit(4)
 					.toList();
+				continue;
 			}
-			else if (trimmed.startsWith("RECOMMENDED:")) {
-				recommended = trimmed.substring("RECOMMENDED:".length()).trim();
+			String recommendedValue = directiveValue(lines.get(i), RECOMMENDED_KEY);
+			if (recommendedValue != null) {
+				recommended = cleanLabel(recommendedValue);
 			}
 		}
 		if (options.isEmpty()) {
@@ -35,8 +47,7 @@ public final class ClarificationResponseParser {
 		}
 		StringBuilder visible = new StringBuilder();
 		for (int i = 0; i < lines.size(); i++) {
-			String trimmed = lines.get(i).trim();
-			if (i == optionsLineIndex || trimmed.startsWith("RECOMMENDED:")) {
+			if (i == optionsLineIndex || directiveValue(lines.get(i), RECOMMENDED_KEY) != null) {
 				continue;
 			}
 			if (!visible.isEmpty()) {
@@ -46,6 +57,25 @@ public final class ClarificationResponseParser {
 		}
 		String visibleContent = visible.toString().trim();
 		return new ParsedClarification(content, visibleContent.isBlank() ? content : visibleContent, options, recommended);
+	}
+
+	/**
+	 * Returns the value after {@code key} on this line, tolerating the bullets and markdown
+	 * emphasis models add despite the prompt, or null when the line is not that directive.
+	 */
+	private static String directiveValue(String line, String key) {
+		if (line == null) {
+			return null;
+		}
+		String candidate = line.trim().replaceFirst(LEADING_BULLET, "").replaceFirst(LEADING_EMPHASIS, "").trim();
+		if (candidate.length() < key.length() || !candidate.substring(0, key.length()).equalsIgnoreCase(key)) {
+			return null;
+		}
+		return candidate.substring(key.length()).replaceFirst(LEADING_EMPHASIS, "").trim();
+	}
+
+	private static String cleanLabel(String label) {
+		return label.trim().replaceAll("^[*_`]+", "").replaceAll("[*_`]+$", "").trim();
 	}
 
 	public record ParsedClarification(String rawContent, String visibleContent, List<String> options,

@@ -463,6 +463,35 @@
     return name ? name.slice(0, 120) : null;
   }
 
+  /**
+   * Same-origin link destinations as an app path (pathname+search+hash); external URLs kept absolute.
+   * Lets the model navigate to the real href instead of inventing currentPath + slug.
+   */
+  function hrefForElement(el) {
+    if (!el || !el.getAttribute) {
+      return null;
+    }
+    var tag = el.tagName ? el.tagName.toLowerCase() : "";
+    var role = (el.getAttribute("role") || "").trim().toLowerCase();
+    if (tag !== "a" && role !== "link") {
+      return null;
+    }
+    var raw = (el.getAttribute("href") || "").trim();
+    if (!raw || raw.indexOf("javascript:") === 0) {
+      return null;
+    }
+    try {
+      var base = typeof window !== "undefined" && window.location ? window.location.href : undefined;
+      var parsed = new URL(raw, base);
+      if (typeof window !== "undefined" && window.location && parsed.origin === window.location.origin) {
+        return parsed.pathname + parsed.search + parsed.hash;
+      }
+      return parsed.href;
+    } catch (error) {
+      return raw.slice(0, 300);
+    }
+  }
+
   function collectHeadings(maxItems) {
     var cap = typeof maxItems === "number" ? maxItems : 20;
     var out = [];
@@ -529,7 +558,7 @@
       var role = roleForElement(el);
       var name = accessibleNameForElement(el, text);
       var ref = "e" + (elements.length + 1);
-      elements.push({
+      var entry = {
         ref: ref,
         role: role,
         name: name,
@@ -541,7 +570,12 @@
         placeholder: el.getAttribute("placeholder") || null,
         ariaLabel: el.getAttribute("aria-label") || null,
         text: text || null
-      });
+      };
+      var href = hrefForElement(el);
+      if (href) {
+        entry.href = href;
+      }
+      elements.push(entry);
     }
     return {
       url: pageState.href,
@@ -641,10 +675,26 @@
     return result;
   }
 
+  /**
+   * Force app-root absolute paths. A bare "deepak/60min" would otherwise resolve relative to
+   * the current route (e.g. /event-types → /event-types/deepak/60min) in many host routers.
+   */
+  function normalizeAppNavigatePath(path) {
+    var trimmed = String(path || "").trim();
+    if (!trimmed) {
+      return trimmed;
+    }
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) || trimmed.charAt(0) === "/" || trimmed.charAt(0) === "?"
+      || trimmed.charAt(0) === "#") {
+      return trimmed;
+    }
+    return "/" + trimmed;
+  }
+
   function navigationTargetFromArgs(args) {
     args = args || {};
     if (args.path && String(args.path).trim()) {
-      var path = String(args.path).trim();
+      var path = normalizeAppNavigatePath(args.path);
       return {
         target: path,
         path: path,
@@ -1986,6 +2036,29 @@
       return row;
     }
 
+    /**
+     * Returns the value after `key` on this line, tolerating the bullets and markdown emphasis
+     * models add despite the prompt, or null when the line is not that directive. Mirrors
+     * ClarificationResponseParser on the server.
+     */
+    function directiveValue(line, key) {
+      if (!line) {
+        return null;
+      }
+      var candidate = String(line).trim()
+        .replace(/^(?:[-*•+]\s+|\d+[.)]\s+)/, "")
+        .replace(/^[*_]{1,2}/, "")
+        .trim();
+      if (candidate.slice(0, key.length).toUpperCase() !== key) {
+        return null;
+      }
+      return candidate.slice(key.length).replace(/^[*_]{1,2}/, "").trim();
+    }
+
+    function cleanOptionLabel(label) {
+      return String(label).trim().replace(/^[*_`]+/, "").replace(/[*_`]+$/, "").trim();
+    }
+
     function parseAssistantOptions(content) {
       if (!content) {
         return null;
@@ -1995,14 +2068,15 @@
       var options = [];
       var recommended = null;
       for (var i = 0; i < lines.length; i++) {
-        var line = lines[i].trim();
-        if (line.indexOf("OPTIONS:") === 0) {
+        var optionsValue = directiveValue(lines[i], "OPTIONS:");
+        if (optionsValue !== null) {
           optionLineIndex = i;
-          options = line.slice("OPTIONS:".length).split("|").map(function (part) {
-            return part.trim();
-          }).filter(Boolean);
-        } else if (line.indexOf("RECOMMENDED:") === 0) {
-          recommended = line.slice("RECOMMENDED:".length).trim();
+          options = optionsValue.split("|").map(cleanOptionLabel).filter(Boolean).slice(0, 4);
+          continue;
+        }
+        var recommendedValue = directiveValue(lines[i], "RECOMMENDED:");
+        if (recommendedValue !== null) {
+          recommended = cleanOptionLabel(recommendedValue);
         }
       }
       if (!options.length) {
@@ -2012,7 +2086,7 @@
         if (idx === optionLineIndex) {
           return false;
         }
-        return line.trim().indexOf("RECOMMENDED:") !== 0;
+        return directiveValue(line, "RECOMMENDED:") === null;
       });
       return {
         text: visibleLines.join("\n").trim(),
@@ -2342,8 +2416,7 @@
     /** Hides the OPTIONS:/RECOMMENDED: control lines while text is still streaming in. */
     function stripOptionsMarkup(text) {
       return String(text).split(/\r?\n/).filter(function (line) {
-        var trimmed = line.trim();
-        return trimmed.indexOf("OPTIONS:") !== 0 && trimmed.indexOf("RECOMMENDED:") !== 0;
+        return directiveValue(line, "OPTIONS:") === null && directiveValue(line, "RECOMMENDED:") === null;
       }).join("\n");
     }
 

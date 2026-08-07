@@ -1,10 +1,17 @@
 package com.actbrow.actbrow.service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -69,6 +76,9 @@ public class RunService {
 	private static final String PROMPT_VERSION = "v1";
 	private final ObjectMapper objectMapper;
 	private final String defaultChatModel;
+	/** Cap concurrent server/API tool calls when the model emits a multi-tool step. */
+	private final int maxParallelTools;
+	private final boolean parallelToolCallsEnabled;
 	// Fast in-process cancel signal only; cross-instance cancellation is observed via run status in the DB.
 	private final Set<String> cancelledRuns = ConcurrentHashMap.newKeySet();
 
@@ -83,7 +93,9 @@ public class RunService {
 		ToolCircuitBreaker toolCircuitBreaker, AuditLogService auditLogService,
 		ProgressiveToolDisclosureService progressiveToolDisclosureService,
 		ActbrowProperties properties, ObjectMapper objectMapper,
-		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel) {
+		@Value("${spring.ai.openai.chat.options.model:deepseek/deepseek-v4-flash}") String defaultChatModel,
+		@Value("${actbrow.agent.max-parallel-tools:8}") int maxParallelTools,
+		@Value("${actbrow.agent.parallel-tool-calls:true}") boolean parallelToolCallsEnabled) {
 		this.runRepository = runRepository;
 		this.runStepRepository = runStepRepository;
 		this.conversationService = conversationService;
@@ -106,6 +118,8 @@ public class RunService {
 		this.properties = properties;
 		this.objectMapper = objectMapper;
 		this.defaultChatModel = defaultChatModel;
+		this.maxParallelTools = Math.max(1, maxParallelTools);
+		this.parallelToolCallsEnabled = parallelToolCallsEnabled;
 	}
 
 	public RunResponse startRun(String conversationId, TurnRequest request) {
@@ -337,7 +351,8 @@ public class RunService {
 				List<ToolDescriptor> tools = forceFinalAnswer
 					? List.of()
 					: progressiveToolDisclosureService.selectForPlanning(run, catalog, memory);
-				String runtimeGuidance = failureTracker.buildRuntimeGuidance();
+				String runtimeGuidance = progressiveToolDisclosureService.specialistRuntimeGuidance(memory)
+					+ failureTracker.buildRuntimeGuidance();
 				if (forceFinalAnswer) {
 					runtimeGuidance += "POLICY DECISION (deterministic, non-negotiable): tool execution for this "
 						+ "run has been stopped — " + forceFinalReason + " No tools are available this turn. "
@@ -404,132 +419,20 @@ public class RunService {
 				conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.ASSISTANT,
 					buildAssistantToolCallsJson(toolCallDecision.toolCalls()));
 
-				// Execute each tool call sequentially within this step
+				// Execute tool calls for this step. Independent server/API tools run in parallel on
+				// virtual threads; browser/client tools stay sequential (they park the run on the SDK).
 				runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.EXECUTING, stepIndex);
 				String assistantId = assistant.getId();
-				for (ToolCall toolCall : toolCallDecision.toolCalls()) {
-					if (isCancelled(runId)) {
-						cancelRunInternal(run);
-						return;
-					}
-					ToolDescriptor tool = resolveTool(tools, catalog, toolCall);
-					Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
-					String executorKey = resolveExecutorKey(tool);
-					boolean deferNavigation = navigatedThisRun && isNavigateTool(tool);
-					ToolContract contract = ToolContract.from(tool);
-
-					ToolExecutionResult result;
-					if (deferNavigation) {
-						recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [deferred]");
-						result = navigationDeferredResult(tool.key());
-					}
-					else {
-						// Production controls (Phase 7): kill switch, circuit breaker, shadow mode.
-						auditLogService.toolAttempt(runId, assistantId, tool.key());
-						String blockReason = null;
-						if (!featureFlagService.isEnabled(assistantId, FeatureFlagService.TOOLS_ENABLED)) {
-							blockReason = "tool execution is disabled for this assistant";
-						}
-						// Circuits are scoped per assistant so one tenant's failing tool can never
-						// open the circuit for every other tenant sharing the same tool key.
-						else if (!toolCircuitBreaker.allow(circuitKey(assistantId, tool))) {
-							auditLogService.circuitOpen(runId, assistantId, tool.key());
-							blockReason = "tool circuit is open after repeated failures";
-						}
-						boolean shadow = blockReason == null && contract.isWrite()
-							&& featureFlagService.isEnabled(assistantId, FeatureFlagService.SHADOW_MODE);
-
-						if (blockReason != null) {
-							recordStep(runId, stepIndex, RunStepType.TOOL_CALL,
-								toolCall.toString() + " [blocked: " + blockReason + "]");
-							result = syntheticBlocked(tool.key(), blockReason);
-						}
-						else if (shadow) {
-							auditLogService.shadowSkip(runId, assistantId, tool.key());
-							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [shadow]");
-							result = syntheticShadow(tool.key());
-						}
-						else {
-							Map<String, Object> requestedPayload = new LinkedHashMap<>();
-							requestedPayload.put("toolCallId", toolCall.toolCallId());
-							requestedPayload.put("toolId", tool.id());
-							requestedPayload.put("toolKey", tool.key());
-							requestedPayload.put("executorKey", executorKey);
-							requestedPayload.put("type", wireToolTypeForClients(tool));
-							requestedPayload.put("arguments", executionArguments);
-							if (ToolCatalogPolicies.executesAsBrowserHttpTool(tool)) {
-								requestedPayload.put("http", browserHttpPayload(tool, executionArguments));
-							}
-							eventBroker.emit(runId, "tool.call.requested", requestedPayload);
-							recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString());
-
-							long toolStartedNanos = System.nanoTime();
-							RunExecutor.ExecutionOutcome execution = runExecutor.execute(run, toolCall, tool,
-								executionArguments, navigatedThisRun, failureTracker, catalog);
-							long toolElapsedMs = (System.nanoTime() - toolStartedNanos) / 1_000_000L;
-							result = execution.result();
-							boolean clientParked = ToolCatalogPolicies.executesAsClientPendingTool(tool.type(),
-								tool.executorRef())
-								|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool);
-							if ("page.observe".equals(tool.key()) || "page.screenshot".equals(tool.key())) {
-								evalTraceRecorder.recordObservationTool(runId, tool.key(),
-									clientParked ? toolElapsedMs : 0L);
-							}
-							else if (clientParked) {
-								evalTraceRecorder.recordClientToolWait(runId, toolElapsedMs);
-							}
-							if (execution.navigated()) {
-								navigatedThisRun = true;
-							}
-							if (result.success()) {
-								toolCircuitBreaker.recordSuccess(circuitKey(assistantId, tool));
-							}
-							else {
-								toolCircuitBreaker.recordFailure(circuitKey(assistantId, tool));
-							}
-						}
-						auditLogService.toolOutcome(runId, assistantId, tool.key(), result.success(), result.error());
-						evalTraceRecorder.recordExecutionAttempt(runId);
-					}
-					failureTracker.recordResult(tool.key(), toolCallSignature(tool, executionArguments), result);
-					String toolMessage = toolResultContentForModel(result);
-					// Store TOOL message with its toolCallId so providers can pair it with the ASSISTANT entry
-					conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
-						toolCall.toolCallId());
-					runMemoryService.recordToolResult(run, toolCall, tool, executionArguments, result, stepIndex);
-					recordStep(runId, stepIndex, RunStepType.TOOL_RESULT, result.toString());
-					Map<String, Object> payload = new LinkedHashMap<>();
-					payload.put("toolCallId", toolCall.toolCallId());
-					payload.put("success", result.success());
-					payload.put("structuredOutput", result.structuredOutput());
-					payload.put("textSummary", result.textSummary());
-					payload.put("error", result.error());
-					eventBroker.emit(runId, "tool.call.completed", payload);
-					runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.VERIFYING, stepIndex);
-					RunVerifier.VerificationDecision verification = runVerifier.verify(tool, result);
-					recordStep(runId, stepIndex, RunStepType.VERIFIER_DECISION, verification.toString());
-					evalTraceRecorder.recordVerifier(runId, verification.toString());
-					// Deterministic recovery policy from the structured failure type. Recorded in the
-					// trace so recovery is code-driven and auditable; the planner still drives the next turn.
-					RunPolicyEngine.PolicyDecision policy = runPolicyEngine.decide(
-						verification.failureType(), tools.size() > 1);
-					recordStep(runId, stepIndex, RunStepType.POLICY_DECISION, policy.toString());
-					// The policy decision is control flow, not just a trace entry: terminal outcomes
-					// strip the toolset for the next planner turn, forcing an honest final answer.
-					if (policy.action() == RunPolicyEngine.PolicyAction.STOP_WITH_EXPLANATION
-						|| policy.action() == RunPolicyEngine.PolicyAction.REQUIRE_USER_INTERVENTION) {
-						forceFinalAnswer = true;
-						forceFinalReason = policy.rationale();
-					}
-					// Safer tool contracts (Phase 6): a successful write should be verified after the fact.
-					if (contract.requiresPostVerification() && result.success()) {
-						recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
-							"write tool '" + tool.key() + "' (sideEffect=" + contract.sideEffectLevel()
-								+ ") requires post-action verification");
-					}
-					if (verification.yieldToPlanner()) {
-						break;
-					}
+				ToolBatchOutcome batchOutcome = executeToolCallBatch(run, runId, assistantId, stepIndex,
+					toolCallDecision.toolCalls(), tools, catalog, failureTracker, navigatedThisRun);
+				if (batchOutcome.cancelled()) {
+					cancelRunInternal(run);
+					return;
+				}
+				navigatedThisRun = batchOutcome.navigatedThisRun();
+				if (batchOutcome.forceFinalAnswer()) {
+					forceFinalAnswer = true;
+					forceFinalReason = batchOutcome.forceFinalReason();
 				}
 			}
 
@@ -569,23 +472,360 @@ public class RunService {
 		eventBroker.complete(run.getId());
 	}
 
-	/** A stable version marker for the current tool catalog, recorded on eval traces. */
-	private static ToolDescriptor resolveTool(List<ToolDescriptor> active, List<ToolDescriptor> catalog,
+	/**
+	 * Runs one model step's tool calls. Parallel-safe server/API tools share a virtual-thread pool
+	 * (capped by {@link #maxParallelTools}); client/browser tools always run on the run loop thread
+	 * because they flip the run into {@code WAITING_FOR_CLIENT_TOOL}.
+	 */
+	private ToolBatchOutcome executeToolCallBatch(RunEntity run, String runId, String assistantId, int stepIndex,
+		List<ToolCall> toolCalls, List<ToolDescriptor> tools, List<ToolDescriptor> catalog,
+		RunToolFailureTracker failureTracker, boolean navigatedThisRun) {
+		List<PreparedToolCall> prepared = new ArrayList<>();
+		boolean nav = navigatedThisRun;
+		for (ToolCall toolCall : toolCalls) {
+			if (isCancelled(runId)) {
+				return ToolBatchOutcome.cancelled(nav);
+			}
+			PreparedToolCall item = prepareToolCall(run, runId, assistantId, stepIndex, toolCall, tools, catalog, nav);
+			prepared.add(item);
+			// Defer further navigates in the same batch once we know one will navigate.
+			if (item.willNavigate()) {
+				nav = true;
+			}
+		}
+
+		// Fan-out only when every executable call in the step is server/API-safe. Mixed batches
+		// (API + browser) stay sequential so we never run a later API after an earlier browser yield,
+		// and TOOL conversation rows keep the model's original call order.
+		List<PreparedToolCall> parallelWork = prepared.stream()
+			.filter(PreparedToolCall::needsExecutor)
+			.filter(PreparedToolCall::parallelSafe)
+			.toList();
+		boolean batchIsParallelSafe = prepared.stream()
+			.filter(PreparedToolCall::needsExecutor)
+			.allMatch(PreparedToolCall::parallelSafe);
+		boolean useParallel = parallelToolCallsEnabled && batchIsParallelSafe && parallelWork.size() > 1;
+
+		Map<String, ExecutedToolCall> byCallId = new LinkedHashMap<>();
+		if (useParallel) {
+			for (PreparedToolCall item : parallelWork) {
+				emitToolRequested(runId, stepIndex, item);
+			}
+			executeParallel(run, runId, catalog, failureTracker, parallelWork, byCallId);
+		}
+
+		boolean forceFinal = false;
+		String forceReason = null;
+		for (PreparedToolCall item : prepared) {
+			if (isCancelled(runId)) {
+				return ToolBatchOutcome.cancelled(nav);
+			}
+			ExecutedToolCall executed;
+			if (!item.needsExecutor()) {
+				executed = new ExecutedToolCall(item, item.earlyResult(), false, 0L);
+			}
+			else if (useParallel) {
+				executed = byCallId.get(item.toolCall().toolCallId());
+				if (executed == null) {
+					executed = runPreparedOnCaller(run, runId, catalog, failureTracker, item);
+				}
+			}
+			else {
+				emitToolRequested(runId, stepIndex, item);
+				executed = runPreparedOnCaller(run, runId, catalog, failureTracker, item);
+			}
+			if (executed.navigated()) {
+				nav = true;
+			}
+			PostRecord post = recordToolOutcome(run, runId, assistantId, stepIndex, tools, executed, failureTracker);
+			if (post.forceFinalAnswer()) {
+				forceFinal = true;
+				forceReason = post.forceFinalReason();
+			}
+			// In a pure parallel API batch, always surface every result (do not break mid-fan-out).
+			if (post.yieldToPlanner() && !useParallel) {
+				break;
+			}
+		}
+		return new ToolBatchOutcome(false, nav, forceFinal, forceReason);
+	}
+
+	private void executeParallel(RunEntity run, String runId, List<ToolDescriptor> catalog,
+		RunToolFailureTracker failureTracker, List<PreparedToolCall> parallelWork,
+		Map<String, ExecutedToolCall> byCallId) {
+		Semaphore permits = new Semaphore(maxParallelTools);
+		try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+			List<CompletableFuture<ExecutedToolCall>> futures = new ArrayList<>();
+			for (PreparedToolCall item : parallelWork) {
+				futures.add(CompletableFuture.supplyAsync(() -> {
+					permits.acquireUninterruptibly();
+					try {
+						if (isCancelled(runId)) {
+							return new ExecutedToolCall(item, syntheticBlocked(item.tool().key(), "run cancelled"),
+								false, 0L);
+						}
+						return runPreparedOnCaller(run, runId, catalog, failureTracker, item);
+					}
+					finally {
+						permits.release();
+					}
+				}, pool));
+			}
+			for (CompletableFuture<ExecutedToolCall> future : futures) {
+				ExecutedToolCall executed = future.join();
+				byCallId.put(executed.prepared().toolCall().toolCallId(), executed);
+			}
+		}
+	}
+
+	private PreparedToolCall prepareToolCall(RunEntity run, String runId, String assistantId, int stepIndex,
+		ToolCall toolCall, List<ToolDescriptor> tools, List<ToolDescriptor> catalog, boolean navigatedThisRun) {
+		Optional<ToolDescriptor> resolved = resolveTool(tools, catalog, toolCall);
+		if (resolved.isEmpty()) {
+			String requestedKey = toolCall.toolKey() == null || toolCall.toolKey().isBlank()
+				? "unknown"
+				: toolCall.toolKey().trim();
+			ToolDescriptor phantom = phantomUnknownTool(requestedKey);
+			ToolExecutionResult result = syntheticUnknownTool(requestedKey, tools);
+			recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [unknown]");
+			Map<String, Object> args = toolCall.arguments() == null ? Map.of() : toolCall.arguments();
+			return PreparedToolCall.early(toolCall, phantom, args, result, false, false);
+		}
+		ToolDescriptor tool = resolved.get();
+		// Best-in-class harness: if the model called a real catalog tool that belongs to the other
+		// specialist (or was not yet activated), auto-route + activate so the call can run and the
+		// next planning turn has the correct schema set — no manual agent.use_* required.
+		if (!ProgressiveToolDisclosureService.isMetaOrAgentSwitchTool(tool.key())) {
+			ProgressiveToolDisclosureService.AutoRouteResult route = progressiveToolDisclosureService
+				.routeForToolCall(run, catalog, tool);
+			if (route.switched()) {
+				recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
+					"harness auto-routed specialist " + route.specialistBefore() + " → "
+						+ route.specialistAfter() + " for tool " + tool.key());
+			}
+		}
+		Map<String, Object> executionArguments = mergeArguments(tool, toolCall.arguments());
+		ToolContract contract = ToolContract.from(tool);
+		boolean deferNavigation = navigatedThisRun && isNavigateTool(tool);
+		if (deferNavigation) {
+			recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [deferred]");
+			return PreparedToolCall.early(toolCall, tool, executionArguments, navigationDeferredResult(tool.key()),
+				false, false);
+		}
+		String blockReason = null;
+		if (!featureFlagService.isEnabled(assistantId, FeatureFlagService.TOOLS_ENABLED)) {
+			blockReason = "tool execution is disabled for this assistant";
+		}
+		else if (!toolCircuitBreaker.allow(circuitKey(assistantId, tool))) {
+			auditLogService.circuitOpen(runId, assistantId, tool.key());
+			blockReason = "tool circuit is open after repeated failures";
+		}
+		boolean shadow = blockReason == null && contract.isWrite()
+			&& featureFlagService.isEnabled(assistantId, FeatureFlagService.SHADOW_MODE);
+		if (blockReason != null) {
+			recordStep(runId, stepIndex, RunStepType.TOOL_CALL,
+				toolCall.toString() + " [blocked: " + blockReason + "]");
+			return PreparedToolCall.early(toolCall, tool, executionArguments,
+				syntheticBlocked(tool.key(), blockReason), false, false);
+		}
+		if (shadow) {
+			auditLogService.shadowSkip(runId, assistantId, tool.key());
+			recordStep(runId, stepIndex, RunStepType.TOOL_CALL, toolCall.toString() + " [shadow]");
+			return PreparedToolCall.early(toolCall, tool, executionArguments, syntheticShadow(tool.key()), false,
+				false);
+		}
+		boolean parallelSafe = ToolCatalogPolicies.isParallelSafe(tool);
+		boolean willNavigate = isNavigateTool(tool);
+		return PreparedToolCall.executable(toolCall, tool, executionArguments, contract, parallelSafe, willNavigate);
+	}
+
+	private void emitToolRequested(String runId, int stepIndex, PreparedToolCall item) {
+		Map<String, Object> requestedPayload = new LinkedHashMap<>();
+		requestedPayload.put("toolCallId", item.toolCall().toolCallId());
+		requestedPayload.put("toolId", item.tool().id());
+		requestedPayload.put("toolKey", item.tool().key());
+		requestedPayload.put("executorKey", resolveExecutorKey(item.tool()));
+		requestedPayload.put("type", wireToolTypeForClients(item.tool()));
+		requestedPayload.put("arguments", item.arguments());
+		if (ToolCatalogPolicies.executesAsBrowserHttpTool(item.tool())) {
+			requestedPayload.put("http", browserHttpPayload(item.tool(), item.arguments()));
+		}
+		eventBroker.emit(runId, "tool.call.requested", requestedPayload);
+		recordStep(runId, stepIndex, RunStepType.TOOL_CALL, item.toolCall().toString()
+			+ (item.parallelSafe() ? " [parallel-ok]" : ""));
+	}
+
+	private ExecutedToolCall runPreparedOnCaller(RunEntity run, String runId, List<ToolDescriptor> catalog,
+		RunToolFailureTracker failureTracker, PreparedToolCall item) {
+		if (!item.needsExecutor()) {
+			return new ExecutedToolCall(item, item.earlyResult(), false, 0L);
+		}
+		long started = System.nanoTime();
+		try {
+			// navigatedThisRun is only meaningful for navigate tools, which never enter the parallel pool.
+			RunExecutor.ExecutionOutcome execution = runExecutor.execute(run, item.toolCall(), item.tool(),
+				item.arguments(), false, failureTracker, catalog);
+			long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+			return new ExecutedToolCall(item, execution.result(), execution.navigated(), elapsedMs);
+		}
+		catch (java.util.concurrent.CancellationException cancellation) {
+			throw cancellation;
+		}
+		catch (Exception exception) {
+			long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+			log.warn("Tool {} failed in batch for run {}", item.tool().key(), runId, exception);
+			return new ExecutedToolCall(item, failureTracker.executorFailureResult(item.tool().key(), exception),
+				false, elapsedMs);
+		}
+	}
+
+	private PostRecord recordToolOutcome(RunEntity run, String runId, String assistantId, int stepIndex,
+		List<ToolDescriptor> tools, ExecutedToolCall executed, RunToolFailureTracker failureTracker) {
+		PreparedToolCall item = executed.prepared();
+		ToolDescriptor tool = item.tool();
+		ToolCall toolCall = item.toolCall();
+		ToolExecutionResult result = executed.result();
+		Map<String, Object> executionArguments = item.arguments();
+
+		if (item.needsExecutor()) {
+			boolean clientParked = ToolCatalogPolicies.executesAsClientPendingTool(tool.type(), tool.executorRef())
+				|| ToolCatalogPolicies.executesAsBrowserHttpTool(tool);
+			if ("page.observe".equals(tool.key()) || "page.screenshot".equals(tool.key())) {
+				evalTraceRecorder.recordObservationTool(runId, tool.key(),
+					clientParked ? executed.elapsedMs() : 0L);
+			}
+			else if (clientParked) {
+				evalTraceRecorder.recordClientToolWait(runId, executed.elapsedMs());
+			}
+			if (result.success()) {
+				toolCircuitBreaker.recordSuccess(circuitKey(assistantId, tool));
+			}
+			else {
+				toolCircuitBreaker.recordFailure(circuitKey(assistantId, tool));
+			}
+			auditLogService.toolAttempt(runId, assistantId, tool.key());
+			auditLogService.toolOutcome(runId, assistantId, tool.key(), result.success(), result.error());
+			evalTraceRecorder.recordExecutionAttempt(runId);
+		}
+		else {
+			// early synthetic paths (unknown / blocked / shadow / deferred)
+			auditLogService.toolAttempt(runId, assistantId, tool.key());
+			auditLogService.toolOutcome(runId, assistantId, tool.key(), result.success(), result.error());
+			evalTraceRecorder.recordExecutionAttempt(runId);
+		}
+
+		failureTracker.recordResult(tool.key(), toolCallSignature(tool, executionArguments), result);
+		String toolMessage = toolResultContentForModel(result);
+		conversationService.appendMessage(run.getConversationId(), ConversationMessageRole.TOOL, toolMessage,
+			toolCall.toolCallId());
+		runMemoryService.recordToolResult(run, toolCall, tool, executionArguments, result, stepIndex);
+		recordStep(runId, stepIndex, RunStepType.TOOL_RESULT, result.toString());
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("toolCallId", toolCall.toolCallId());
+		payload.put("success", result.success());
+		payload.put("structuredOutput", result.structuredOutput());
+		payload.put("textSummary", result.textSummary());
+		payload.put("error", result.error());
+		eventBroker.emit(runId, "tool.call.completed", payload);
+		runCheckpointService.recordPhase(runId, run.getConversationId(), RunPhase.VERIFYING, stepIndex);
+		RunVerifier.VerificationDecision verification = runVerifier.verify(tool, result);
+		recordStep(runId, stepIndex, RunStepType.VERIFIER_DECISION, verification.toString());
+		evalTraceRecorder.recordVerifier(runId, verification.toString());
+		RunPolicyEngine.PolicyDecision policy = runPolicyEngine.decide(verification.failureType(), tools.size() > 1);
+		recordStep(runId, stepIndex, RunStepType.POLICY_DECISION, policy.toString());
+		boolean forceFinal = policy.action() == RunPolicyEngine.PolicyAction.STOP_WITH_EXPLANATION
+			|| policy.action() == RunPolicyEngine.PolicyAction.REQUIRE_USER_INTERVENTION;
+		ToolContract contract = item.contract() != null ? item.contract() : ToolContract.from(tool);
+		if (contract.requiresPostVerification() && result.success()) {
+			recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
+				"write tool '" + tool.key() + "' (sideEffect=" + contract.sideEffectLevel()
+					+ ") requires post-action verification");
+		}
+		return new PostRecord(forceFinal, forceFinal ? policy.rationale() : null, verification.yieldToPlanner());
+	}
+
+	private record ToolBatchOutcome(boolean cancelled, boolean navigatedThisRun, boolean forceFinalAnswer,
+		String forceFinalReason) {
+		static ToolBatchOutcome cancelled(boolean navigatedThisRun) {
+			return new ToolBatchOutcome(true, navigatedThisRun, false, null);
+		}
+	}
+
+	private record PostRecord(boolean forceFinalAnswer, String forceFinalReason, boolean yieldToPlanner) {
+	}
+
+	private record PreparedToolCall(
+		ToolCall toolCall,
+		ToolDescriptor tool,
+		Map<String, Object> arguments,
+		ToolContract contract,
+		boolean needsExecutor,
+		boolean parallelSafe,
+		boolean willNavigate,
+		ToolExecutionResult earlyResult
+	) {
+		static PreparedToolCall early(ToolCall toolCall, ToolDescriptor tool, Map<String, Object> arguments,
+			ToolExecutionResult result, boolean parallelSafe, boolean willNavigate) {
+			return new PreparedToolCall(toolCall, tool, arguments, ToolContract.from(tool), false, parallelSafe,
+				willNavigate, result);
+		}
+
+		static PreparedToolCall executable(ToolCall toolCall, ToolDescriptor tool, Map<String, Object> arguments,
+			ToolContract contract, boolean parallelSafe, boolean willNavigate) {
+			return new PreparedToolCall(toolCall, tool, arguments, contract, true, parallelSafe, willNavigate, null);
+		}
+	}
+
+	private record ExecutedToolCall(
+		PreparedToolCall prepared,
+		ToolExecutionResult result,
+		boolean navigated,
+		long elapsedMs
+	) {
+	}
+
+	/**
+	 * Resolve a model tool call against the active schema set, then the full assistant catalog, then
+	 * progressive-disclosure meta tools. Soft-matches wire-style names ({@code app_navigate} ↔
+	 * {@code app.navigate}) so a catalog tool not in this turn's active schema can still run when the
+	 * model echoes a remembered name. Empty when the name was invented and never existed.
+	 */
+	static Optional<ToolDescriptor> resolveTool(List<ToolDescriptor> active, List<ToolDescriptor> catalog,
 		ToolCall toolCall) {
 		return active.stream()
 			.filter(item -> matchesTool(item, toolCall))
 			.findFirst()
 			.or(() -> catalog.stream().filter(item -> matchesTool(item, toolCall)).findFirst())
-			.or(() -> ProgressiveToolDisclosureService.metaToolByKey(toolCall.toolKey()))
-			.orElseThrow(() -> new IllegalArgumentException(
-				"Unknown tool requested by model: " + toolCall.toolKey()));
+			.or(() -> ProgressiveToolDisclosureService.metaToolByKey(toolCall.toolKey()));
 	}
 
 	private static boolean matchesTool(ToolDescriptor item, ToolCall toolCall) {
+		if (toolCall.toolId() != null && item.id() != null && toolCall.toolId().equals(item.id())) {
+			return true;
+		}
 		if (toolCall.toolKey() != null && toolCall.toolKey().equals(item.key())) {
 			return true;
 		}
-		return item.id() != null && item.id().equals(toolCall.toolId());
+		// Wire-form equivalence when the provider passed an unresolved name through.
+		if (toolCall.toolKey() != null) {
+			String requested = normalizeToolWireName(toolCall.toolKey());
+			return !requested.isEmpty() && requested.equals(normalizeToolWireName(item.key()));
+		}
+		return false;
+	}
+
+	/** {@code app.navigate} / {@code app-navigate} / {@code app_navigate} → same wire form. */
+	static String normalizeToolWireName(String name) {
+		if (name == null) {
+			return "";
+		}
+		return name.replace('.', '_').replace('-', '_').toLowerCase(Locale.ROOT);
+	}
+
+	/** Placeholder descriptor so memory/verifier can record an invented tool name. */
+	private static ToolDescriptor phantomUnknownTool(String requestedKey) {
+		return new ToolDescriptor(null, requestedKey, "Unknown tool (model invented this name)",
+			"{\"type\":\"object\"}", ToolType.BUILD_IN, requestedKey, Map.of(), Map.of());
 	}
 
 	private static String toolsetVersion(List<ToolDescriptor> tools) {
@@ -604,6 +844,30 @@ public class RunService {
 	private static ToolExecutionResult syntheticBlocked(String toolKey, String reason) {
 		String message = "Tool '" + toolKey + "' was not run: " + reason
 			+ ". Choose a different tool or produce a final answer explaining the block.";
+		return new ToolExecutionResult(false, null, message, message);
+	}
+
+	/**
+	 * Recoverable result when the model invents a tool that is not in the assistant catalog.
+	 * Includes tools available this turn so the next planner step can switch correctly.
+	 * Phrase "unknown tool" is intentional — {@link FailureClassifier} maps it to TOOL_EXHAUSTED.
+	 */
+	static ToolExecutionResult syntheticUnknownTool(String requestedKey, List<ToolDescriptor> availableThisTurn) {
+		String label = requestedKey == null || requestedKey.isBlank() ? "(empty)" : requestedKey.trim();
+		List<String> keys = availableThisTurn == null
+			? List.of()
+			: availableThisTurn.stream()
+				.map(ToolDescriptor::key)
+				.filter(key -> key != null && !key.isBlank())
+				.distinct()
+				.sorted()
+				.limit(40)
+				.toList();
+		String available = keys.isEmpty() ? "(none listed this turn)" : String.join(", ", keys);
+		String message = "Unknown tool '" + label + "'. That tool does not exist or is not available this turn. "
+			+ "Available tools this turn: " + available + ". "
+			+ "Use only those names. If you need an API/HTTP tool, call agent.use_api then tool.search/tool.activate. "
+			+ "If you need page/navigation tools, call agent.use_browser. Do not invent tool names.";
 		return new ToolExecutionResult(false, null, message, message);
 	}
 
@@ -699,7 +963,39 @@ public class RunService {
 				merged.put("path", fixedPath);
 			}
 		}
+		// Ensure navigate paths are app-root absolute so host routers do not resolve them relative to the
+		// current page (e.g. "deepak/60min" on /event-types → /event-types/deepak/60min).
+		if (isNavigateTool(tool)) {
+			Object path = merged.get("path");
+			if (path != null) {
+				String normalized = normalizeAppNavigatePath(String.valueOf(path));
+				if (!normalized.isBlank()) {
+					merged.put("path", normalized);
+				}
+			}
+		}
 		return merged;
+	}
+
+	/**
+	 * Paths without a leading slash become root-absolute. Schemes, ?, and # are left alone.
+	 */
+	static String normalizeAppNavigatePath(String path) {
+		if (path == null) {
+			return "";
+		}
+		String trimmed = path.trim();
+		if (trimmed.isEmpty()) {
+			return trimmed;
+		}
+		char first = trimmed.charAt(0);
+		if (first == '/' || first == '?' || first == '#') {
+			return trimmed;
+		}
+		if (trimmed.matches("^[a-zA-Z][a-zA-Z0-9+.-]*:.*")) {
+			return trimmed;
+		}
+		return "/" + trimmed;
 	}
 
 	private static ToolExecutionResult navigationDeferredResult(String toolKey) {
@@ -830,41 +1126,51 @@ public class RunService {
 			prompt.append(assistant.getSystemPrompt()).append("\n\n");
 		}
 
-		prompt.append("OPERATING MODE: You are acting on behalf of the user inside a host web app. You have a small set of built-in observation tools plus a generic navigation primitive. You have NO general-purpose write or DOM-manipulation primitives.\n")
+		// Harness-first system prompt: static product rules here; per-step TURN CONTRACT + specialist
+		// state are injected via runtime guidance (modular context — avoids curse-of-instructions bloat).
+		prompt.append(HarnessPromptContract.turnEfficiencyContract())
+			.append(HarnessPromptContract.failureRecoveryRules())
+			.append(HarnessPromptContract.verifyBeforeDoneRules())
+			.append("OPERATING MODE: In-app assistant for a host web app. Two specialists share the run; only one is active. The harness auto-routes when intent is pure (search/activate/direct catalog call).\n")
 			.append("\n")
-			.append("Built-in tools (always available):\n")
-			.append("  - path.find        Returns the user's current path, full URL, page title, query, and hash. Call this when you need to know where the user is.\n")
-			.append("  - page.observe     Returns a compact structured snapshot (interactive elements with ref/role/name, headings, capped visibleText). Prefer this for questions about what is on screen.\n")
-			.append("  - page.screenshot  Fallback capture. Text mode aliases page.observe; image mode returns a viewport PNG. Use ONLY when page.observe / PAGE_CONTEXT cannot answer (canvas, unlabeled icons, visual layout).\n")
-			.append("  - app.navigate     Moves the user to a path inside the host app (path or url argument). Use this to take the user somewhere; never use it as a way to read. Successful results include pageObserve — treat that as already observed.\n")
-			.append("  - knowledge.search Search operator-configured knowledge (policies, product facts, SOPs). Use ONLY when the user needs company or product information that PAGE_CONTEXT, page.observe, and other tools cannot provide. Call at most once per turn. If it returns no results, say you do not have that information — do not invent it.\n")
+			.append("SPECIALIST ROUTING:\n")
+			.append("  - tool.search / tool.activate — pure-domain hits auto-switch + activate (prefer this over agent.use_*).\n")
+			.append("  - Direct call of a real catalog tool auto-routes if needed, then runs.\n")
+			.append("  - agent.use_browser / agent.use_api — explicit force only.\n")
+			.append("  - Active specialist is restated each step in runtime guidance.\n")
 			.append("\n")
-			.append("Operation tools (writes, side-effects beyond navigation) appear ONLY in the function schema for this turn and ONLY if the operator attached them. Do not try to synthesize an operation by chaining observation/navigation calls.\n")
+			.append("Browser tools: path.find | page.observe | page.screenshot | app.navigate\n")
+			.append("  - path.find: current path/url/title. page.observe: structured page snapshot (prefer over screenshot).\n")
+			.append("  - page.screenshot: vision/fallback only. app.navigate: absolute app-root path starting with /;\n")
+			.append("    never prefix with current path (on /event-types go to /deepak/60min not /event-types/deepak/60min).\n")
+			.append("    Prefer observed link href. Success includes pageObserve — do not re-observe same turn.\n")
 			.append("\n")
-			.append("HARD RULES — violating these is the worst failure mode:\n")
-			.append("  1. Never call a tool that is not in the function schema for this turn. Never invent tool names, paths, URLs, or arguments that aren't supported by an attached tool's schema and defaults.\n")
-			.append("  2. NEVER describe page content, page state, lists, buttons, headings, or messages that you did not actually receive from a successful tool result OR from PAGE_CONTEXT on the user message. If a tool result says success=false, errored, or timed out, you have NO information from it — do not pretend you do.\n")
-			.append("     2a. When you DO describe page content, every concrete detail (a name, an email, a price, a heading, a button label, a status message, a row in a list) MUST appear verbatim in PAGE_CONTEXT, the most recent page.observe / navigate pageObserve, or page.screenshot.visibleText/elements. Knowledge search results are operator-provided facts, not observed page content — use them only for policies and product rules, never to describe what is on screen.\n")
-			.append("  3. If a tool fails or times out, tell the user honestly: which tool, what failed, and that you can't see the page. Do not improvise a description. Do not retry the same tool with the same arguments.\n")
-			.append("     3a. Tool failures do NOT automatically end the run. If the failure suggests a repair, continue with a corrected next action, a different tool, or one focused clarification.\n")
-			.append("  4. PAGE_CONTEXT on the user message (and pageObserve attached to a successful app.navigate) already counts as observation for this turn. Prefer answering from that. Call page.observe or page.screenshot AT MOST ONCE per user turn, and only if PAGE_CONTEXT / pageObserve is missing or insufficient. Call path.find only when you need location and it is not already in context. Call knowledge.search AT MOST ONCE per user turn, and only when needed for operator-configured facts. After observation and any needed knowledge lookup, produce a final answer.\n")
-			.append("  5. NEVER call the same tool twice with the same arguments. The result will not change.\n")
-			.append("  6. If two observation calls have not given you what you need, stop calling tools. Give a final answer that says what you tried.\n")
-			.append("  7. If no action tool can fulfill the user's request, do NOT improvise. Give a final answer that politely tells the user to do it themselves. When you have real observation, reference what you saw (the current path, a section name, a button label) so the user knows where to act. When you do NOT have observation, do not invent one — just say so.\n")
-			.append("  8. If the user's request is unclear, ask one focused clarifying question instead of guessing.\n")
+			.append("Shared: knowledge.search — operator knowledge only when page tools cannot answer; at most once per turn; no inventing.\n")
+			.append("API: operator HTTP/MCP tools after search/auto-route. Multiple independent APIs in one step run in parallel.\n")
 			.append("\n")
-			.append("GUIDED WALKTHROUGHS (multi-step tours, onboarding, requests with \"then\"/\"next\", numbered steps, or navigation flows):\n")
-			.append("  - When the user asks for several things in sequence, guide them one step at a time — not a silent tour of every page.\n")
-			.append("  - Perform at most ONE navigation (app.navigate or a dedicated nav tool) per user message. Reading data (HTTP tools, page.observe) for the current step is fine in the same turn.\n")
-			.append("  - After that navigation (or after finishing the current step's reads), STOP with a final answer: name the page, say what the user can do here, and preview the next step.\n")
-			.append("  - End every walkthrough pause with clickable options using this exact format (on their own lines at the end):\n")
-			.append("    OPTIONS: Continue to [next step] | Skip tour | Stay here\n")
-			.append("    RECOMMENDED: Continue to [next step]\n")
-			.append("    Use 2–4 short, action-oriented labels. When the tour is finished, omit OPTIONS or offer only relevant follow-ups.\n")
-			.append("  - Do NOT chain multiple navigations in one turn. Do NOT visit every page and summarize only at the end.\n")
-			.append("  - When the user clicks an option or sends its text, perform the next step only.\n")
+			.append("HARD RULES:\n")
+			.append("  1. Only schema / tool.search keys. Never invent tools, paths, or on-screen facts.\n")
+			.append("  1a. app.navigate paths are root-absolute; use href when present.\n")
+			.append("  2. Page facts only from PAGE_CONTEXT or successful page.observe / navigate pageObserve / screenshot fields.\n")
+			.append("  2a. Every concrete name/label/price must appear verbatim in that evidence. knowledge.search is not page content.\n")
+			.append("  3. On tool failure: honest + recoverable next action (see ON TOOL FAILURE). No same-args retry.\n")
+			.append("  4. PAGE_CONTEXT / navigate pageObserve counts as observation. page.observe|screenshot ≤1/turn; knowledge.search ≤1/turn.\n")
+			.append("  5. Never same tool+args twice. After two useless observations, stop and say what you tried.\n")
+			.append("  6. No action tool → tell the user what to do themselves, grounded in real observation only.\n")
+			.append("  7. Unclear ask → one clarification with OPTIONS when choices exist (see below).\n")
 			.append("\n")
-			.append("In every turn, the cheapest correct outcome is a final answer. Tool calls are only justified when they unlock a final answer you could not otherwise give.\n\n");
+			.append("CLICKABLE CHOICES (picks, not prose):\n")
+			.append("  - Clarifications and short observed lists end with:\n")
+			.append("    OPTIONS: label one | label two\n")
+			.append("    RECOMMENDED: label one\n")
+			.append("  - Labels verbatim from evidence. ≤4 options. Line must start with OPTIONS: (no bullets/bold).\n")
+			.append("  - Act only after the user picks.\n")
+			.append("\n")
+			.append("GUIDED WALKTHROUGHS:\n")
+			.append("  - One navigation per user message; then final answer + OPTIONS to continue.\n")
+			.append("  - Never silent multi-page tours.\n")
+			.append("\n")
+			.append("Cheapest correct outcome: a final answer. Tools only when they unlock an answer you lack.\n\n");
 
 		if (assistant.isUsePredefinedFlows()) {
 			try {

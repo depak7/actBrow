@@ -63,10 +63,7 @@ public class ContextAssembler {
 		systemPrompt.append(workingMemoryBlock);
 		systemPrompt.append(currentStateBlock);
 		systemPrompt.append(UNTRUSTED_DATA_END).append("\n\n");
-		systemPrompt.append("CONTEXT PRIORITY ORDER:\n");
-		systemPrompt.append("  1. Current page/app state and the latest successful tool result.\n");
-		systemPrompt.append("  2. Working memory for this run (objective, known entities, blockers, last action).\n");
-		systemPrompt.append("  3. The conversation message list, older messages only when still relevant.\n\n");
+		systemPrompt.append(HarnessPromptContract.evidencePriorityRules());
 		systemPrompt.append("Use the layered context explicitly. Do not reconstruct state from stale history when working memory or current state already provides it.\n");
 
 		return new ContextAssembly(systemPrompt.toString(), workingMemoryBlock, currentStateBlock);

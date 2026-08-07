@@ -331,22 +331,66 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 		List<ToolCall> calls = new ArrayList<>();
 		for (AssistantMessage.ToolCall stc : springToolCalls) {
 			String requestedName = stc.name();
-			ToolDescriptor tool = toolsByWireName.get(requestedName);
-			if (tool == null) {
-				// Fallback for models echoing the raw catalog key instead of the wire name.
-				tool = tools.stream()
-					.filter(t -> t.key().equals(requestedName))
-					.findFirst()
-					.orElseThrow(() -> new IllegalArgumentException(
-						"Chat model requested unknown tool: " + requestedName));
-			}
+			ToolDescriptor tool = resolveRequestedTool(requestedName, tools, toolsByWireName);
 			Map<String, Object> arguments = parseArguments(stc.arguments());
 			String callId = (stc.id() != null && !stc.id().isBlank())
 				? stc.id()
 				: "tc-" + UUID.randomUUID();
+			if (tool == null) {
+				// Do not kill the run when the model invents a tool name. Pass the request through so
+				// RunService can return a synthetic failure listing tools available this turn.
+				String unresolvedKey = (requestedName == null || requestedName.isBlank())
+					? "unknown"
+					: requestedName.trim();
+				calls.add(new ToolCall(callId, null, unresolvedKey, arguments));
+				continue;
+			}
 			calls.add(new ToolCall(callId, tool.id(), tool.key(), arguments));
 		}
 		return new ToolCallDecision("Model requested " + calls.size() + " tool(s)", calls);
+	}
+
+	/**
+	 * Resolves a model-emitted function name against the tools offered this turn. Order:
+	 * wire name map → exact catalog key → sanitized key equivalence ({@code app_navigate} ↔
+	 * {@code app.navigate}). Returns null when nothing matches so the run can recover.
+	 */
+	static ToolDescriptor resolveRequestedTool(String requestedName, List<ToolDescriptor> tools,
+		Map<String, ToolDescriptor> toolsByWireName) {
+		if (requestedName == null || requestedName.isBlank()) {
+			return null;
+		}
+		ToolDescriptor byWire = toolsByWireName == null ? null : toolsByWireName.get(requestedName);
+		if (byWire != null) {
+			return byWire;
+		}
+		if (tools == null || tools.isEmpty()) {
+			return null;
+		}
+		// Models sometimes echo the raw catalog key (with dots) instead of the wire name.
+		for (ToolDescriptor tool : tools) {
+			if (requestedName.equals(tool.key())) {
+				return tool;
+			}
+		}
+		String normalizedRequested = normalizeToolWireName(requestedName);
+		if (normalizedRequested.isEmpty()) {
+			return null;
+		}
+		for (ToolDescriptor tool : tools) {
+			if (normalizedRequested.equals(normalizeToolWireName(tool.key()))) {
+				return tool;
+			}
+		}
+		return null;
+	}
+
+	/** Shared with RunService: {@code app.navigate} / {@code app-navigate} / {@code app_navigate}. */
+	static String normalizeToolWireName(String name) {
+		if (name == null) {
+			return "";
+		}
+		return name.replace('.', '_').replace('-', '_').toLowerCase(java.util.Locale.ROOT);
 	}
 
 	private Map<String, Object> parseArguments(String argumentsJson) {
@@ -367,21 +411,20 @@ public class OpenAiCompatibleModelProvider implements ModelProvider {
 			builder.append(systemPrompt).append("\n\n");
 		}
 		builder.append("You are the backend decision engine for an embedded SaaS assistant. ");
-		builder.append("If a listed tool is required, the API will emit it as a native tool/function call—never as text. ");
+		builder.append(com.actbrow.actbrow.service.HarnessPromptContract.modelProviderHarnessPrefix());
+		builder.append(" ");
+		builder.append("If a listed tool is required, emit it as a native tool/function call—never as text. ");
 		builder.append("If no tool is required, reply with a concise final answer in plain text only. ");
-		builder.append("Use only the declared function names. Do not invent tools. ");
 		builder.append("When several navigation tools exist, prefer the specific tool whose description matches the request ");
 		builder.append("(follow assistant-configured default paths in each tool description). ");
-		builder.append("After a tool result appears in the conversation, use it to continue toward a final answer. ");
-		builder.append("Always prioritize the latest user turn over older tool failures or older requests. ");
-		builder.append("Do not mention a previous tool failure unless the latest user turn is clearly continuing that same task. ");
-		builder.append("If the latest user turn is short, ambiguous, or could refer to multiple destinations or actions, ");
-		builder.append("ask a clarifying question instead of claiming failure. ");
 		builder.append("When you ask a clarifying question, offer 2 to 4 concrete options and format them exactly like this: ");
 		builder.append("first the question in plain text, then a new line `OPTIONS: option one | option two`, ");
 		builder.append("and optionally a new line `RECOMMENDED: option one`. ");
 		builder.append("Use the same OPTIONS format when pausing a guided walkthrough so the user can click Continue to proceed. ");
-		builder.append("Do not use the OPTIONS format unless you are asking the user to choose or continue a tour.");
+		builder.append("Use it as well whenever a tool result or the page already contains the short list the user must pick from ");
+		builder.append("(event types, available time slots, matching records): copy those labels verbatim onto the OPTIONS line instead of describing them in prose. ");
+		builder.append("The OPTIONS line must start with `OPTIONS:` — no bold, bullet, or numbering before it, or the choices will not render. ");
+		builder.append("Do not use the OPTIONS format unless you are asking the user to choose, offering choices you actually observed, or continuing a tour.");
 		return builder.toString();
 	}
 

@@ -45,7 +45,7 @@ public class AssistantService {
 	private final RunMemoryRepository runMemoryRepository;
 
 	public AssistantService(AssistantRepository assistantRepository, ToolService toolService,
-		@Value("${spring.ai.openai.chat.options.model:gemini-2.5-flash}") String defaultChatModel,
+		@Value("${spring.ai.openai.chat.options.model:deepseek/deepseek-v4-flash}") String defaultChatModel,
 		AssistantToolBindingRepository toolBindingRepository,
 		NavigationFlowRepository navigationFlowRepository,
 		KnowledgeDocumentRepository knowledgeDocumentRepository,
