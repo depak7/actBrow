@@ -3,6 +3,10 @@
 - `V20260701__create_run_memories.sql`
   - Creates `run_memories`
   - Adds `idx_run_memories_conversation_id`
+- `V20260701_0_1__create_missing_core_tables.sql`
+  - Creates the historical core tables (`users`, `assistants`, `tools`, conversations,
+    runs, and related tables) when they are missing
+  - Allows a new database and deployments that predate the Flyway baseline to migrate safely
 - `V20260701_1__add_conversation_message_seq.sql`
   - Adds nullable `seq BIGINT` to `conversation_messages` (deterministic tiebreaker for message ordering)
 - `V20260701_2__create_run_checkpoints.sql`
@@ -32,4 +36,6 @@
 
 Flyway is enabled (`spring.flyway.enabled=true`, `baseline-on-migrate=true`, `baseline-version=0`).
 `SchemaPatchRunner` was removed — additive schema must ship as versioned SQL here.
-Core tables (users/assistants/tools/runs/…) are still assumed from the historical schema; a full greenfield baseline remains a follow-up.
+`V20260701_0_1__create_missing_core_tables.sql` is an idempotent compatibility baseline. It
+sorts before the first migration that alters a historical table, so existing deployments at
+version `20260701` repair themselves without changing existing tables or data.
