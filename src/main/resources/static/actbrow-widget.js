@@ -21,6 +21,16 @@
       throw new Error("actbrow-sdk.js must be loaded before actbrow-widget.js");
     }
 
+    // boot() is re-runnable (see ActbrowWidgetBoot below), so clear any live instance first —
+    // otherwise a re-boot stacks a second launcher on top of the first.
+    if (global.ActbrowWidget && typeof global.ActbrowWidget.destroy === "function") {
+      try {
+        global.ActbrowWidget.destroy();
+      } catch (error) {
+        /* a broken teardown must not block the new widget */
+      }
+    }
+
     var script = findWidgetScript();
     var config = global.ActbrowWidgetConfig || {};
     var assistantId = config.assistantId || (script && script.getAttribute("data-assistant-id"));
@@ -105,6 +115,11 @@
       .then(function (body) { finish(body && body.theme ? body.theme : null); })
       .catch(function () { finish(null); });
   }
+
+  // Hosts whose signed-in user can change without a page load (a dashboard SPA, or a site that
+  // swaps a logged-out demo assistant for the visitor's own) update ActbrowWidgetConfig and call
+  // this to remount against the new identity. Ordinary embeds never need it.
+  global.ActbrowWidgetBoot = boot;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
