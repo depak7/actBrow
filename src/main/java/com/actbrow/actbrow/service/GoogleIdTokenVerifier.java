@@ -48,6 +48,12 @@ public class GoogleIdTokenVerifier {
 		if (idToken == null || idToken.isBlank()) {
 			throw new IllegalArgumentException("idToken is required");
 		}
+		String clientId = properties.clientId();
+		if (clientId == null || clientId.isBlank()) {
+			// Without a client id there is no audience to check, and skipping the check would accept a
+			// Google token minted for any other app. Refuse sign-in so the misconfiguration is loud.
+			throw new IllegalStateException("Google sign-in is not configured: set GOOGLE_OAUTH_CLIENT_ID");
+		}
 		try {
 			URI uri = UriComponentsBuilder.fromUriString("https://oauth2.googleapis.com/tokeninfo")
 				.queryParam("id_token", idToken)
@@ -57,20 +63,24 @@ public class GoogleIdTokenVerifier {
 			if (body == null || body.containsKey("error")) {
 				throw new IllegalArgumentException("Invalid Google token");
 			}
-			String clientId = properties.clientId();
-			if (clientId != null && !clientId.isBlank()) {
-				Object aud = body.get("aud");
-				if (aud instanceof String s && !s.equals(clientId)) {
-					throw new IllegalArgumentException("Token audience mismatch");
-				}
-				if (aud instanceof List<?> list && !list.contains(clientId)) {
-					throw new IllegalArgumentException("Token audience mismatch");
-				}
+			if (!audienceMatches(body.get("aud"), clientId)) {
+				throw new IllegalArgumentException("Token audience mismatch");
 			}
 			return body;
 		}
 		catch (HttpStatusCodeException e) {
 			throw new IllegalArgumentException("Google token verification failed", e);
 		}
+	}
+
+	/** A missing or unexpected {@code aud} is a mismatch, not a pass. */
+	static boolean audienceMatches(Object aud, String clientId) {
+		if (aud instanceof String s) {
+			return s.equals(clientId);
+		}
+		if (aud instanceof List<?> list) {
+			return list.contains(clientId);
+		}
+		return false;
 	}
 }

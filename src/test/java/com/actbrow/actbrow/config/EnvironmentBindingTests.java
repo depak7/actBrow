@@ -54,4 +54,11 @@ class EnvironmentBindingTests {
 		assertThat(env(Map.of("GEMINI_API_KEY", "real-key")).getProperty("spring.ai.openai.api-key"))
 			.isEqualTo("real-key");
 	}
+
+	@Test
+	void noGoogleClientIdIsCommittedAsAFallback() throws Exception {
+		assertThat(env(Map.of()).getProperty("actbrow.google.oauth.client-id")).isEmpty();
+		assertThat(env(Map.of("GOOGLE_OAUTH_CLIENT_ID", "id.apps.googleusercontent.com"))
+			.getProperty("actbrow.google.oauth.client-id")).isEqualTo("id.apps.googleusercontent.com");
+	}
 }
