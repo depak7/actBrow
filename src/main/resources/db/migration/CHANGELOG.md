@@ -39,3 +39,8 @@ Flyway is enabled (`spring.flyway.enabled=true`, `baseline-on-migrate=true`, `ba
 `V20260701_0_1__create_missing_core_tables.sql` is an idempotent compatibility baseline. It
 sorts before the first migration that alters a historical table, so existing deployments at
 version `20260701` repair themselves without changing existing tables or data.
+- `V20260923__assistant_safety_flags.sql`
+  - Creates `assistant_safety_flags` (one row per assistant + flag, with `updated_by` / `updated_at`)
+  - Persists the dashboard kill switch and shadow mode, which previously lived only in process memory
+    and silently reverted to the `actbrow.flags.*` baseline on every restart or deploy
+  - Assistants with no row keep the configured baseline, so this is a no-op until a switch is flipped

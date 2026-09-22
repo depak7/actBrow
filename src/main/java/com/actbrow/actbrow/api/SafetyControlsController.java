@@ -30,13 +30,11 @@ import jakarta.validation.Valid;
  * breakers). These exist so an incident can be handled from the UI instead of by hand-crafting curl
  * against an internal service.
  *
- * <p><strong>Runtime overrides set here are IN-MEMORY and do NOT survive a restart or redeploy.</strong>
- * After the process restarts, every assistant reverts to the configured baseline
- * ({@code actbrow.flags.*}), and all circuit state is lost (circuits start closed). This is a
- * deliberate limitation, not a bug: the flags are designed for fast, reversible incident response,
- * and the durable kill switch is the environment variable {@code ACTBROW_TOOLS_ENABLED}
- * (likewise {@code ACTBROW_SHADOW_MODE}). If an outage needs to outlive a deploy, set the env var —
- * the UI surfaces this caveat next to the toggles.
+ * <p>The kill switch and shadow mode set here are persisted per assistant
+ * ({@code assistant_safety_flags}) and survive restarts and deploys. Circuit breaker state is still
+ * in memory: circuits start closed after a restart. The environment variables
+ * {@code ACTBROW_TOOLS_ENABLED} / {@code ACTBROW_SHADOW_MODE} set the baseline for assistants with no
+ * override of their own.
  *
  * <p>All endpoints are account-scoped: the assistant must belong to the calling user.
  */
@@ -79,12 +77,13 @@ public class SafetyControlsController {
 		authorizationService.requireOwnedAssistant(assistantId, authType, userId);
 		if (request.toolsEnabled() != null) {
 			featureFlagService.setAssistantFlag(assistantId, FeatureFlagService.TOOLS_ENABLED,
-				request.toolsEnabled());
+				request.toolsEnabled(), userId);
 			auditLogService.safetyFlagChanged(assistantId, FeatureFlagService.TOOLS_ENABLED,
 				request.toolsEnabled(), userId);
 		}
 		if (request.shadowMode() != null) {
-			featureFlagService.setAssistantFlag(assistantId, FeatureFlagService.SHADOW_MODE, request.shadowMode());
+			featureFlagService.setAssistantFlag(assistantId, FeatureFlagService.SHADOW_MODE, request.shadowMode(),
+				userId);
 			auditLogService.safetyFlagChanged(assistantId, FeatureFlagService.SHADOW_MODE, request.shadowMode(),
 				userId);
 		}

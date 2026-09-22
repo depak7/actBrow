@@ -50,6 +50,14 @@ public class RunService {
 
 	private static final Logger log = LoggerFactory.getLogger(RunService.class);
 
+	static final String UNVERIFIED_NAVIGATION_GUIDANCE = "HARNESS CHECK (deterministic): your previous reply said "
+		+ "you moved the user to a page, but no navigation tool was called in this turn, so the page did NOT "
+		+ "change. Earlier turns do not count. If the user asked to go somewhere, call the matching navigation "
+		+ "tool now. Otherwise answer without claiming you moved them.\n\n";
+
+	static final String UNVERIFIED_NAVIGATION_FALLBACK = "I didn't actually open that page just now. "
+		+ "Ask me again and I'll take you there.";
+
 	/** Planning attempts per step before the run degrades to an honest partial answer. */
 	private static final int PLANNING_ATTEMPTS = 3;
 
@@ -325,6 +333,10 @@ public class RunService {
 			// the model must produce an honest final answer instead of continuing to act.
 			boolean forceFinalAnswer = false;
 			String forceFinalReason = null;
+			// Set when a final answer claimed a navigation that never happened this run; the next
+			// planner turn gets one explicit correction before the harness stops trusting the claim.
+			boolean navigationClaimChallenged = false;
+			boolean correctNavigationClaim = false;
 			evalTraceRecorder.begin(run, PROMPT_VERSION, toolsetVersion(catalog));
 
 			// The assistant's configured model wins; fall back to the deployment default.
@@ -365,6 +377,10 @@ public class RunService {
 						+ "Produce an honest final answer: state plainly what was attempted, what failed or is "
 						+ "blocked, and what the user can do next. Do not invent results.\n\n";
 				}
+				if (correctNavigationClaim) {
+					runtimeGuidance += UNVERIFIED_NAVIGATION_GUIDANCE;
+					correctNavigationClaim = false;
+				}
 				// Stream text tokens to the client as they are generated. Deltas are advisory UI
 				// output: the authoritative content is still the decision returned below, and a
 				// cancelled run stops emitting immediately.
@@ -390,7 +406,22 @@ public class RunService {
 				runMemoryService.recordModelDecision(run, decision, stepIndex);
 				evalTraceRecorder.recordPlanning(runId, decision.toString());
 
-				if (decision instanceof FinalResponseDecision finalResponse) {
+				if (decision instanceof FinalResponseDecision proposed) {
+					FinalResponseDecision finalResponse = proposed;
+					// The answer says the user was moved, but no navigation tool succeeded in this run:
+					// the page did not change. Re-plan once with the correction; if the model still
+					// insists, publish an honest fallback rather than the false claim.
+					if (!navigatedThisRun && NavigationClaimGuard.claimsNavigation(proposed.message())) {
+						if (!navigationClaimChallenged && !forceFinalAnswer) {
+							navigationClaimChallenged = true;
+							correctNavigationClaim = true;
+							recordStep(runId, stepIndex, RunStepType.POLICY_DECISION,
+								"PolicyDecision[action=REJECT_UNVERIFIED_NAVIGATION_CLAIM, rationale=Final answer "
+									+ "claimed a navigation but no navigation tool succeeded this run.]");
+							continue;
+						}
+						finalResponse = new FinalResponseDecision(UNVERIFIED_NAVIGATION_FALLBACK);
+					}
 					// Win the terminal transition BEFORE publishing the answer: if a concurrent
 					// cancel already flipped the run, the cancellation is final and we stay silent.
 					if (runRepository.finishIfActive(runId, RunStatus.COMPLETED, null, Instant.now()) == 0) {
