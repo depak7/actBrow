@@ -50,6 +50,12 @@ public class RunService {
 
 	private static final Logger log = LoggerFactory.getLogger(RunService.class);
 
+	/** Planning attempts per step before the run degrades to an honest partial answer. */
+	private static final int PLANNING_ATTEMPTS = 3;
+
+	/** Linear backoff between planning attempts; multiplied by the attempt number. */
+	private static final long PLANNING_RETRY_BACKOFF_MS = 400L;
+
 	@Value("${spring.ai.openai.chat.options.model}")
 	private String model;
 
@@ -375,10 +381,11 @@ public class RunService {
 					deltaPayload.put("delta", delta);
 					eventBroker.emit(runId, "assistant.message.delta", deltaPayload);
 				};
-				RunPlanner.PlanningOutcome planning = runPlanner.plan(chatModel, assistant, run, messages, tools,
-					stepIndex, buildSystemPrompt(assistant, run.getConversationId()),
-					runtimeGuidance, onTextDelta, memory);
-				ModelDecision decision = planning.decision();
+				RunPlanner.PlanningOutcome planning = planWithRetry(chatModel, assistant, run, messages, tools,
+					stepIndex, runtimeGuidance, onTextDelta, memory, runId);
+				ModelDecision decision = planning == null
+					? degradedFinalAnswer(navigatedThisRun)
+					: planning.decision();
 				recordStep(runId, stepIndex, RunStepType.MODEL_DECISION, decision.toString());
 				runMemoryService.recordModelDecision(run, decision, stepIndex);
 				evalTraceRecorder.recordPlanning(runId, decision.toString());
@@ -1052,6 +1059,59 @@ public class RunService {
 		catch (JsonProcessingException e) {
 			return "[tool_calls][][/tool_calls]";
 		}
+	}
+
+	/**
+	 * Planning calls fail transiently: a provider hiccup, or a reply the parser rejects because the
+	 * model returned neither text nor tool calls. That is not a reason to lose the run — by this point
+	 * the user may already have been navigated, so failing outright tells them "something went wrong"
+	 * about work that actually succeeded. Retry a couple of times, then let the caller degrade.
+	 *
+	 * @return the planning outcome, or {@code null} when every attempt failed.
+	 */
+	private RunPlanner.PlanningOutcome planWithRetry(String chatModel,
+		AssistantDefinitionEntity assistant, RunEntity run, List<com.actbrow.actbrow.model.ConversationMessageEntity> messages,
+		List<ToolDescriptor> tools, int stepIndex, String runtimeGuidance,
+		java.util.function.Consumer<String> onTextDelta, RunMemoryService.RunMemorySnapshot memory,
+		String runId) {
+		RuntimeException lastFailure = null;
+		for (int attempt = 1; attempt <= PLANNING_ATTEMPTS; attempt++) {
+			try {
+				return runPlanner.plan(chatModel, assistant, run, messages, tools, stepIndex,
+					buildSystemPrompt(assistant, run.getConversationId()), runtimeGuidance, onTextDelta, memory);
+			}
+			catch (RuntimeException failure) {
+				lastFailure = failure;
+				if (isCancelled(runId)) {
+					throw failure;
+				}
+				log.warn("Run {} planning attempt {}/{} failed: {}", runId, attempt, PLANNING_ATTEMPTS,
+					failure.toString());
+				if (attempt < PLANNING_ATTEMPTS) {
+					try {
+						Thread.sleep(PLANNING_RETRY_BACKOFF_MS * attempt);
+					}
+					catch (InterruptedException interrupted) {
+						Thread.currentThread().interrupt();
+						throw failure;
+					}
+				}
+			}
+		}
+		log.error("Run {} planning failed after {} attempts", runId, PLANNING_ATTEMPTS, lastFailure);
+		return null;
+	}
+
+	/**
+	 * Last-resort answer when planning cannot be recovered. It must never invent a result: it reports
+	 * only what the run is known to have done, which for a navigation is visible to the user anyway
+	 * because the page already changed underneath them.
+	 */
+	private static FinalResponseDecision degradedFinalAnswer(boolean navigatedThisRun) {
+		return new FinalResponseDecision(navigatedThisRun
+			? "I've taken you to the page you asked for, but I couldn't finish writing the explanation. "
+				+ "Ask me again and I'll describe what's here."
+			: "I couldn't complete that request just now. Please try again.");
 	}
 
 	private void failRun(RunEntity run, String error) {
